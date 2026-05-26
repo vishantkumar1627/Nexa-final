@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Caches
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Environments
+.env
+.venv
+venv/
+ENV/
+env/
+
+# Databases
+backend/architecture.db
+*.db
+*.sqlite
+
+# Application Outputs
+backend/outputs/
+outputs/
+
+# OS-specific
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
