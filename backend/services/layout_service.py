@@ -5,58 +5,62 @@ import json
 from typing import Dict, Any, List, Tuple
 import numpy as np
 
+from services.room_taxonomy import resolve_room_type, get_room_meta, ZONE_ADJACENCY
+
 class LayoutGenerationService:
-    ROOM_WEIGHTS = {
-        "living_room": 35.0,
-        "bedroom": 22.0,
-        "dining_room": 16.0,
-        "kitchen": 16.0,
-        "garage": 26.0,
-        "bathroom": 8.0,
-        "balcony": 8.0,
+
+    # Legacy static fallback weights kept for corridor/hallway auto-generated nodes
+    _STATIC_WEIGHTS = {
         "corridor": 10.0,
         "hallway": 10.0,
-        "entrance": 8.0
     }
 
+    def _get_room_weight(self, room_id: str) -> float:
+        """Return layout weight from taxonomy, with graceful fallback."""
+        canonical = resolve_room_type(room_id)
+        meta = get_room_meta(canonical)
+        return meta.get("weight", self._STATIC_WEIGHTS.get(canonical, 16.0))
+
     def _get_base_type(self, room_id: str) -> str:
-        """Helper to extract general room category from identifier."""
-        room_id_lower = room_id.lower()
-        for key in ["bedroom", "bathroom", "kitchen", "living_room", "dining_room", "garage", "balcony", "corridor", "hallway", "entrance"]:
-            if key in room_id_lower:
-                return key
-        return "bedroom"
+        """Resolve any room ID string to its canonical taxonomy key."""
+        return resolve_room_type(room_id)
 
     def _classify_zoning(self, nodes: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-        """Classifies rooms into Architectural Zones (Public, Private, Service)."""
-        zones = {"public": [], "private": [], "service": []}
+        """
+        Classifies rooms into architectural zones using taxonomy metadata.
+        All zones present in ZONE_ADJACENCY are supported dynamically.
+        """
+        # Build an empty bucket for every zone that may appear
+        all_zones = list(ZONE_ADJACENCY.keys())
+        zones: Dict[str, List] = {z: [] for z in all_zones}
+
         for node in nodes:
-            base_type = self._get_base_type(node.get("id", "bedroom"))
-            if base_type in ["bedroom", "balcony"]:
-                zones["private"].append(node)
-            elif base_type in ["bathroom"]:
-                # If there are multiple bathrooms, allocate the first as common (service) and others as private (ensuite).
-                # If only one bathroom, classify as private so it clusters with bedrooms.
-                existing_bathrooms = [n for n in nodes if self._get_base_type(n.get("id", "")) == "bathroom"]
-                if len(existing_bathrooms) > 1 and node == existing_bathrooms[0]:
-                    zones["service"].append(node)
+            canonical = resolve_room_type(node.get("id", ""))
+            meta = get_room_meta(canonical)
+            zone = meta.get("zone", "public")
+
+            # Special bathroom split: first bathroom goes to service zone if > 1
+            if canonical == "bathroom":
+                bathroom_nodes = [n for n in nodes if resolve_room_type(n.get("id", "")) == "bathroom"]
+                if len(bathroom_nodes) > 1 and node == bathroom_nodes[0]:
+                    zone = "service"
                 else:
-                    zones["private"].append(node)
-            elif base_type in ["kitchen"]:
-                zones["service"].append(node)
-            elif base_type in ["living_room", "dining_room", "garage", "entrance"]:
-                zones["public"].append(node)
+                    zone = "private"
+
+            if zone in zones:
+                zones[zone].append(node)
             else:
-                zones["public"].append(node)
+                zones["public"].append(node)   # safety net
+
         return zones
 
     def _partition_rooms(self, rooms_list: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Greedily balances rooms into two lists of roughly equal weights for balanced BSP partitioning."""
-        sorted_rooms = sorted(rooms_list, key=lambda r: self.ROOM_WEIGHTS.get(self._get_base_type(r.get("id", "")), 16.0), reverse=True)
+        sorted_rooms = sorted(rooms_list, key=lambda r: self._get_room_weight(r.get("id", "")), reverse=True)
         g1, g2 = [], []
         w1, w2 = 0.0, 0.0
         for r in sorted_rooms:
-            weight = self.ROOM_WEIGHTS.get(self._get_base_type(r.get("id", "")), 16.0)
+            weight = self._get_room_weight(r.get("id", ""))
             if w1 <= w2:
                 g1.append(r)
                 w1 += weight
@@ -96,8 +100,8 @@ class LayoutGenerationService:
         w = box[2] - box[0]
         h = box[3] - box[1]
         
-        w1 = sum(self.ROOM_WEIGHTS.get(self._get_base_type(r.get("id", "")), 16.0) for r in g1)
-        w2 = sum(self.ROOM_WEIGHTS.get(self._get_base_type(r.get("id", "")), 16.0) for r in g2)
+        w1 = sum(self._get_room_weight(r.get("id", "")) for r in g1)
+        w2 = sum(self._get_room_weight(r.get("id", "")) for r in g2)
         ratio = w1 / (w1 + w2) if (w1 + w2) > 0 else 0.5
         ratio = max(0.3, min(0.7, ratio))
         
@@ -215,7 +219,7 @@ class LayoutGenerationService:
         active_zones = {}
         for zone_name, zone_nodes in zones.items():
             if zone_nodes:
-                weight_sum = sum(self.ROOM_WEIGHTS.get(self._get_base_type(n.get("id", "")), 16.0) for n in zone_nodes)
+                weight_sum = sum(self._get_room_weight(n.get("id", "")) for n in zone_nodes)
                 active_zones[zone_name] = {
                     "nodes": zone_nodes,
                     "weight": weight_sum
@@ -237,10 +241,11 @@ class LayoutGenerationService:
         if total_active_weight == 0:
             total_active_weight = 1.0
             
-        # 3. First-Level Subdivision
+        # 3. First-Level Subdivision — use all active zones in ZONE_ADJACENCY order
+        zone_order = ["public", "private", "service", "utility", "recreation", "security"]
         zone_boxes = {}
         remaining_box = [bx1, by1, bx2, by2]
-        sorted_zone_names = [z for z in ["public", "private", "service"] if z in active_zones]
+        sorted_zone_names = [z for z in zone_order if z in active_zones]
         
         for idx, zone_name in enumerate(sorted_zone_names):
             if idx == len(sorted_zone_names) - 1:
@@ -448,39 +453,53 @@ class LayoutGenerationService:
                 "is_entrance": True
             })
             
-        # 7. Exterior Windows placement only
+        # 7. Exterior Windows placement based on taxonomy windows preference
         windows = []
         for room in rooms_layout:
             r_id = room["id"]
-            r_type = self._get_base_type(r_id)
-            if r_type in ["corridor", "hallway", "garage"]:
+            canonical = self._get_base_type(r_id)
+            meta = get_room_meta(canonical)
+            win_pref = meta.get("windows", "partial")
+            if win_pref == "none":
+                continue  # Security/theater rooms get no windows
+            if canonical in ["corridor", "hallway", "garage"]:
                 continue
                 
             x1, y1, x2, y2 = room["box"]
-            if abs(y1 - by1) < 5:
+            # Full windows: place on all exterior faces
+            # Partial windows: place on one face only
+            # Minimal: only if room is on top/bottom exterior
+            faces_added = 0
+            max_faces = {"full": 4, "partial": 2, "minimal": 1}.get(win_pref, 2)
+
+            if abs(y1 - by1) < 5 and faces_added < max_faces:
                 windows.append({
                     "room_id": r_id,
                     "start": [x1 + int((x2 - x1) * 0.25), y1],
                     "end": [x1 + int((x2 - x1) * 0.75), y1]
                 })
-            if abs(y2 - by2) < 5:
+                faces_added += 1
+            if abs(y2 - by2) < 5 and faces_added < max_faces:
                 windows.append({
                     "room_id": r_id,
                     "start": [x1 + int((x2 - x1) * 0.25), y2],
                     "end": [x1 + int((x2 - x1) * 0.75), y2]
                 })
-            if abs(x1 - bx1) < 5:
+                faces_added += 1
+            if abs(x1 - bx1) < 5 and faces_added < max_faces:
                 windows.append({
                     "room_id": r_id,
                     "start": [bx1, y1 + int((y2 - y1) * 0.25)],
                     "end": [bx1, y1 + int((y2 - y1) * 0.75)]
                 })
-            if abs(x2 - bx2) < 5:
+                faces_added += 1
+            if abs(x2 - bx2) < 5 and faces_added < max_faces:
                 windows.append({
                     "room_id": r_id,
                     "start": [bx2, y1 + int((y2 - y1) * 0.25)],
                     "end": [bx2, y1 + int((y2 - y1) * 0.75)]
                 })
+                faces_added += 1
                 
         # 8. Multi-Criteria Architecture scoring engine
         score = 100.0
@@ -616,28 +635,22 @@ class LayoutGenerationService:
         master_height = 600
         scale = 50
         
-        zoning_colors = {
-            "bedroom": (173, 216, 230, 95),       # Elegant Soft Blue
-            "bathroom": (152, 251, 152, 95),      # Elegant Soft Green
-            "kitchen": (255, 250, 205, 95),       # Elegant Soft Cream
-            "living_room": (255, 228, 225, 95),   # Elegant Soft Coral
-            "dining_room": (230, 230, 250, 95),   # Elegant Lavender
-            "garage": (240, 240, 240, 95),        # Sleek Soft Grey
-            "balcony": (255, 218, 185, 95),       # Warm Peach
-            "corridor": (245, 245, 245, 95),      # Elegant White
-            "hallway": (245, 245, 245, 95)
-        }
+        # Dynamic zoning colors from taxonomy metadata
+        def _get_fill(room_id: str) -> tuple:
+            canonical = self._get_base_type(room_id)
+            meta = get_room_meta(canonical)
+            r, g, b = meta["color"]
+            return (r, g, b, 95)
 
         # Clean blueprint white background
         from PIL import Image, ImageDraw
         img = Image.new("RGBA", (master_width, master_height), (250, 248, 245, 255))
         draw = ImageDraw.Draw(img)
 
-        # A. Fill zoned rooms
+        # A. Fill zoned rooms using taxonomy colors
         for room in best["rooms"]:
             x1, y1, x2, y2 = room["box"]
-            base_t = self._get_base_type(room["id"])
-            color_fill = zoning_colors.get(base_t, (255, 255, 255, 90))
+            color_fill = _get_fill(room["id"])
             draw.rectangle([x1, y1, x2, y2], fill=color_fill, outline=None)
 
         # B. Draw Grid Lines
@@ -683,18 +696,26 @@ class LayoutGenerationService:
                 draw.polygon([dcx - 8, dcy + 22, dcx + 8, dcy + 22, dcx, dcy + 10], fill=(40, 167, 69, 255))
                 draw.text((dcx - 28, dcy + 25), "ENTRANCE", fill=(40, 167, 69, 255), stroke_width=1, stroke_fill=(255, 255, 255))
 
-        # F. Annotate Room Details
+        # F. Annotate Room Details using taxonomy label
         for room in best["rooms"]:
             x1, y1, x2, y2 = room["box"]
             rx, ry = (x1 + x2) / 2, (y1 + y2) / 2
-            
-            label = room["id"].replace("_", " ").upper()
+
+            canonical = self._get_base_type(room["id"])
+            meta = get_room_meta(canonical)
+            label = meta.get("label", room["id"].replace("_", " ").upper())
+            # Append index suffix for numbered rooms (bedroom_2, etc.)
+            if room["id"] != canonical and "_" in room["id"]:
+                suffix = room["id"].rsplit("_", 1)[-1]
+                if suffix.isdigit():
+                    label = f"{label} {suffix}"
+
             w_m = (x2 - x1) / scale
             h_m = (y2 - y1) / scale
             w_ft = int(w_m * 3.28084)
             h_ft = int(h_m * 3.28084)
             dims_text = f"{w_ft}'-0\" X {h_ft}'-0\""
-            
+
             draw.text((rx - 38, ry - 12), label, fill=(26, 32, 44), stroke_width=2, stroke_fill=(255, 255, 255))
             draw.text((rx - 30, ry + 6), dims_text, fill=(74, 85, 104), stroke_width=2, stroke_fill=(255, 255, 255))
 

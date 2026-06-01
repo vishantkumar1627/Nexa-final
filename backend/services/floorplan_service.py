@@ -2,25 +2,76 @@ import cv2
 import numpy as np
 from typing import Dict, Any, List, Tuple
 
+from services.room_taxonomy import resolve_room_type, get_room_meta
+
 class FloorplanVectorizationService:
+
+    # ── Generic furniture icon renderer ──────────────────────────────────────
+    def _draw_generic_furniture(self, furniture_list: List[str], box: List[int], hex_color: str) -> List[str]:
+        """Renders simple labelled rectangles for each furniture item in unknown room types."""
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        lines = []
+        n = len(furniture_list)
+        if n == 0:
+            return lines
+        cols = min(n, 3)
+        rows = (n + cols - 1) // cols
+        cell_w = w / (cols + 1)
+        cell_h = h / (rows + 1)
+        for idx, item in enumerate(furniture_list):
+            col = idx % cols
+            row = idx // cols
+            fx = x1 + (col + 0.5) * cell_w
+            fy = y1 + (row + 0.8) * cell_h
+            fw, fh = cell_w * 0.55, cell_h * 0.55
+            lines.append(
+                f'  <rect x="{fx - fw/2:.1f}" y="{fy - fh/2:.1f}" width="{fw:.1f}" height="{fh:.1f}" '
+                f'rx="2" fill="#f7fafc" stroke="#4a5568" stroke-width="1" opacity="0.8" />'
+            )
+            label = item.replace("_", " ").upper()
+            lines.append(
+                f'  <text x="{fx:.1f}" y="{fy + 3:.1f}" font-family="Inter,sans-serif" '
+                f'font-size="6px" fill="#4a5568" text-anchor="middle">{label}</text>'
+            )
+        return lines
+
+    # ── Room-type SVG furniture dispatcher ───────────────────────────────────
     def _draw_furniture_svg(self, room_type: str, box: List[int]) -> List[str]:
-        """Procedurally constructs gorgeous detailed vector SVG elements for furniture, stairs, cars, and fixtures."""
+        """Routes to a specific procedural renderer or the generic fallback based on taxonomy."""
+        canonical = resolve_room_type(room_type)
+        meta = get_room_meta(canonical)
+        hex_color = meta.get("hex_color", "#e2e8f0")
+        furniture_list = meta.get("furniture", [])
+
+        # Dispatch to specific renderers
+        specific = self._draw_specific_furniture(canonical, box)
+        if specific is not None:
+            return specific
+
+        # Fallback: generic furniture icon grid
+        return self._draw_generic_furniture(furniture_list, box, hex_color)
+
+    def _draw_specific_furniture(self, canonical: str, box: List[int]):
+        """Returns SVG lines for known room types, or None to trigger the generic fallback."""
         x1, y1, x2, y2 = box
         w = x2 - x1
         h = y2 - y1
         cx = (x1 + x2) / 2
         cy = (y1 + y2) / 2
         
+        x1, y1, x2, y2 = box
+        w = x2 - x1
+        h = y2 - y1
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+
         lines = []
-        room_type = room_type.lower()
-        
-        # Style tokens
         furniture_color = "#4a5568"
         furniture_fill = "#f7fafc"
         wood_color = "#cbd5e0"
-        bed_accent = "#e2e8f0"
-        
-        if "bedroom" in room_type:
+
+        if canonical == "bedroom":
             # 1. DRAW A GORGEOUS BED (with pillows, sheets, and side tables!)
             bed_w = w * 0.55
             bed_h = h * 0.65
@@ -70,7 +121,9 @@ class FloorplanVectorizationService:
                 lines.append(f'  <line x1="{hx - 2}" y1="{wy + 3}" x2="{hx + 2}" y2="{wy + 3}" stroke="{wood_color}" stroke-width="0.75" />')
                 lines.append(f'  <line x1="{hx}" y1="{wy + 3}" x2="{hx}" y2="{wy + ward_h - 3}" stroke="{wood_color}" stroke-width="0.75" />')
                 
-        elif "living" in room_type or "drawing" in room_type:
+            return lines
+
+        if canonical in ("living_room",):
             # 1. DRAW A GORGEOUS SOFA SET & COFFEE TABLE
             sofa_w = w * 0.70
             sofa_h = min(h * 0.20, 32)
@@ -109,7 +162,9 @@ class FloorplanVectorizationService:
             lines.append(f'  <rect x="{cx - tv_w/2}" y="{y1 + 1}" width="{tv_w}" height="{tv_h}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
             lines.append(f'  <text x="{cx}" y="{y1 + 7}" font-family="Inter, sans-serif" font-weight="600" font-size="6px" fill="{furniture_color}" text-anchor="middle">T.V. UNIT</text>')
             
-        elif "bathroom" in room_type or "toilet" in room_type:
+            return lines
+
+        if canonical == "bathroom":
             # 1. DRAW A DETAILED TOILET BOWL
             toilet_w = min(w * 0.20, 20)
             toilet_h = min(h * 0.30, 28)
@@ -138,7 +193,9 @@ class FloorplanVectorizationService:
             lines.append(f'  <line x1="{shx}" y1="{shy}" x2="{shx + show_w}" y2="{shy + show_h}" stroke="{furniture_color}" stroke-width="0.5" stroke-dasharray="2,2" />')
             lines.append(f'  <line x1="{shx + show_w}" y1="{shy}" x2="{shx}" y2="{shy + show_h}" stroke="{furniture_color}" stroke-width="0.5" stroke-dasharray="2,2" />')
 
-        elif "kitchen" in room_type:
+            return lines
+
+        if canonical == "kitchen":
             # 1. DRAW L-SHAPED KITCHEN COUNTER
             cnt_d = min(w * 0.20, 24)
             lines.append(f'  <rect x="{x1 + 8}" y="{y1 + 8}" width="{w - 16}" height="{cnt_d}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
@@ -165,7 +222,9 @@ class FloorplanVectorizationService:
             lines.append(f'  <circle cx="{six + sink_w - 3}" cy="{siy + sink_h/2}" r="1" fill="{furniture_color}" />')
             lines.append(f'  <line x1="{six + sink_w - 3}" y1="{siy + sink_h/2}" x2="{six + sink_w - 8}" y2="{siy + sink_h/2}" stroke="{furniture_color}" stroke-width="1" />')
 
-        elif "garage" in room_type or "parking" in room_type:
+            return lines
+
+        if canonical == "garage":
             # 1. DRAW A GORGEOUS DETAILED CAR VECTOR
             car_w = w * 0.45
             car_h = h * 0.75
@@ -190,7 +249,9 @@ class FloorplanVectorizationService:
             lines.append(f'  <rect x="{cx1 - 2}" y="{cy1 + car_h - 22}" width="2" height="12" rx="1" fill="{furniture_color}" />')
             lines.append(f'  <rect x="{cx1 + car_w}" y="{cy1 + car_h - 22}" width="2" height="12" rx="1" fill="{furniture_color}" />')
 
-        elif "balcony" in room_type:
+            return lines
+
+        if canonical == "balcony":
             lines.append(f'  <rect x="{x1}" y="{y1}" width="{w}" height="{h}" fill="none" stroke="{furniture_color}" stroke-width="1" />')
             # Railing balusters
             for bx in range(x1 + 6, x2, 10):
@@ -199,7 +260,9 @@ class FloorplanVectorizationService:
             lines.append(f'  <line x1="{x1}" y1="{y1 + 3}" x2="{x2}" y2="{y1 + 3}" stroke="{furniture_color}" stroke-width="2" />')
             lines.append(f'  <line x1="{x1}" y1="{y2 - 3}" x2="{x2}" y2="{y2 - 3}" stroke="{furniture_color}" stroke-width="2" />')
 
-        elif "wash" in room_type or "stair" in room_type:
+            return lines
+
+        if canonical in ("corridor", "hallway"):
             # DRAW A BEAUTIFUL STAIR BLOCK
             st_w = w * 0.80
             st_h = h * 0.70
@@ -216,7 +279,70 @@ class FloorplanVectorizationService:
             lines.append(f'  <line x1="{stx + 10}" y1="{cy}" x2="{stx + st_w - 10}" y2="{cy}" stroke="{furniture_color}" stroke-width="1.5" />')
             lines.append(f'  <path d="M {stx + st_w - 16} {cy - 4} L {stx + st_w - 10} {cy} L {stx + st_w - 16} {cy + 4}" fill="none" stroke="{furniture_color}" stroke-width="1.5" />')
 
-        return lines
+            return lines
+
+        # Gym
+        if canonical == "gym":
+            items = [("TREADMILL", 0.15, 0.1, 0.35, 0.5),
+                     ("BENCH", 0.55, 0.1, 0.3, 0.25),
+                     ("WEIGHTS", 0.55, 0.45, 0.3, 0.2)]
+            for lbl, rx, ry, rw, rh in items:
+                fx, fy = x1 + rx * w, y1 + ry * h
+                fw2, fh2 = rw * w, rh * h
+                lines.append(f'  <rect x="{fx}" y="{fy}" width="{fw2}" height="{fh2}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+                lines.append(f'  <text x="{fx + fw2/2}" y="{fy + fh2/2 + 3}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">{lbl}</text>')
+            return lines
+
+        # Theater / Cinema
+        if canonical in ("theater_room", "home_theater"):
+            # Dark room with rows of seats
+            rows, cols_c = 3, 4
+            sw, sh = w * 0.12, h * 0.12
+            for r in range(rows):
+                for c in range(cols_c):
+                    sx = x1 + w * 0.1 + c * (sw + 6)
+                    sy = y1 + h * 0.3 + r * (sh + 6)
+                    lines.append(f'  <rect x="{sx}" y="{sy}" width="{sw}" height="{sh}" rx="2" fill="#2d3748" stroke="{furniture_color}" stroke-width="1" />')
+            # Screen
+            lines.append(f'  <rect x="{x1 + w*0.1}" y="{y1 + 6}" width="{w*0.8}" height="{h*0.18}" rx="2" fill="#1a202c" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'  <text x="{cx}" y="{y1 + h*0.17}" font-family="Inter" font-size="7px" fill="#e2e8f0" text-anchor="middle">SCREEN</text>')
+            return lines
+
+        # Panic / Security room
+        if canonical == "panic_room":
+            # Safe box
+            lines.append(f'  <rect x="{x1+8}" y="{y1+8}" width="{w*0.3}" height="{h*0.4}" rx="2" fill="#2d3748" stroke="{furniture_color}" stroke-width="2" />')
+            lines.append(f'  <circle cx="{x1+8+w*0.15}" cy="{y1+8+h*0.2}" r="5" fill="none" stroke="#e2e8f0" stroke-width="1.5" />')
+            lines.append(f'  <text x="{x1+8+w*0.15}" y="{y1+8+h*0.42+8}" font-family="Inter" font-size="6px" fill="{furniture_color}" text-anchor="middle">SAFE</text>')
+            # Monitor
+            lines.append(f'  <rect x="{x1+w*0.5}" y="{y1+8}" width="{w*0.4}" height="{h*0.3}" rx="2" fill="#1a202c" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'  <text x="{x1+w*0.7}" y="{y1+8+h*0.17}" font-family="Inter" font-size="6px" fill="#68d391" text-anchor="middle">MONITOR</text>')
+            return lines
+
+        # Library
+        if canonical == "library":
+            # Bookshelves along walls
+            for side_y in [y1+6, y2-14]:
+                lines.append(f'  <rect x="{x1+6}" y="{side_y}" width="{w-12}" height="10" fill="#dcc8aa" stroke="{furniture_color}" stroke-width="1" />')
+                for bx_i in range(int((w-12)/8)):
+                    lines.append(f'  <rect x="{x1+7+bx_i*8}" y="{side_y+1}" width="6" height="8" rx="1" fill="#a0522d" stroke="none" opacity="0.5" />')
+            # Armchair
+            lines.append(f'  <rect x="{cx-12}" y="{cy-10}" width="24" height="20" rx="4" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            return lines
+
+        # Office / Study
+        if canonical in ("office", "home_office", "study_room"):
+            # Desk
+            lines.append(f'  <rect x="{x1+8}" y="{y1+8}" width="{w*0.6}" height="{h*0.25}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'  <text x="{x1+8+w*0.3}" y="{y1+8+h*0.16}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">DESK</text>')
+            # Chair
+            lines.append(f'  <circle cx="{x1+8+w*0.3}" cy="{y1+8+h*0.38}" r="{min(w,h)*0.1}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+            # Monitor
+            lines.append(f'  <rect x="{x1+8+w*0.15}" y="{y1+5}" width="{w*0.3}" height="{h*0.12}" rx="1" fill="#1a202c" stroke="{furniture_color}" stroke-width="1" />')
+            return lines
+
+        # No specific renderer matched
+        return None
 
     def vectorize_layout(self, layout_metadata: Dict[str, Any], image_bytes: bytes) -> Tuple[str, str, Dict[str, Any]]:
         """Vectorizes a raster floor plan using coordinate metadata and OpenCV contours, returning SVG, DXF, and Vector JSON."""

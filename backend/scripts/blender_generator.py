@@ -4,6 +4,16 @@ import json
 import math
 import argparse
 
+# =============================================================================
+# PROCEDURAL 3D ARCHITECTURE GENERATOR
+# Pipeline: Geometry -> Materials -> Procedural Furniture -> Lighting -> Eevee Render
+# =============================================================================
+
+# Inject backend path so Blender can import our taxonomy
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+from services.room_taxonomy import resolve_room_type, get_room_meta
+
+
 # Since this script runs inside Blender's Python shell, we import bpy safely
 try:
     import bpy
@@ -250,8 +260,12 @@ def build_floorplan_3d(layout_data: dict, output_dir: str):
     max_house_y = -999.0
 
     # ==========================================
-    # 1. GENERATE FLOORS AND CEILINGS
+    # 1. GENERATE ROOM-BY-ROOM ARCHITECTURE (Floor, Ceiling, 4 Walls)
     # ==========================================
+    wall_height = 2.8
+    wall_thickness = 0.2
+    wall_objs = []  # Keep tracks to apply boolean cuts later
+
     for idx, room in enumerate(rooms):
         rx1, ry1, rx2, ry2 = room["box"]
         x1, y1 = to_blender_coords(rx1, ry1, width, height, scale)
@@ -269,76 +283,31 @@ def build_floorplan_3d(layout_data: dict, output_dir: str):
         size_y = abs(y2 - y1)
         floor_thickness = 0.05
         
-        # 1A. Floor Slab (Z = -floor_thickness/2)
+        # 1. Floor mesh
         floor_obj = create_cube(f"Floor_{room['id']}", (cx, cy, -floor_thickness/2), (size_x, size_y, floor_thickness))
         if "bathroom" in room["id"].lower():
             floor_obj.data.materials.append(materials['tile'])
         else:
             floor_obj.data.materials.append(materials['floor_wood'])
             
-        # 1B. Ceiling Slab (Z = 2.8 + floor_thickness/2)
-        ceiling_obj = create_cube(f"Ceiling_{room['id']}", (cx, cy, 2.8 + floor_thickness/2), (size_x, size_y, floor_thickness), materials['wall'])
+        # 2. Ceiling mesh
+        ceiling_obj = create_cube(f"Ceiling_{room['id']}", (cx, cy, wall_height + floor_thickness/2), (size_x, size_y, floor_thickness), materials['wall'])
 
-    # ==========================================
-    # 2. EXTRUDE WALLS PROCEDURALLY
-    # ==========================================
-    wall_height = 2.8
-    wall_thickness = 0.2
-    wall_objs = []  # Keep tracks to apply boolean cuts later
-
-    for idx, wall in enumerate(walls):
-        wx1, wy1, wx2, wy2, is_ext = wall
-        x1, y1 = to_blender_coords(wx1, wy1, width, height, scale)
-        x2, y2 = to_blender_coords(wx2, wy2, width, height, scale)
-
-        # Vector math to draw wall profile at Z = 0
-        dx = x2 - x1
-        dy = y2 - y1
-        length = math.sqrt(dx*dx + dy*dy)
-        if length == 0:
-            continue
+        # 3. Left wall (West)
+        wall_w = create_cube(f"Wall_W_{room['id']}", (x1, cy, wall_height/2), (wall_thickness, size_y + wall_thickness, wall_height), materials['wall'])
+        wall_objs.append((wall_w, x1, cy))
         
-        # Perpendicular normal vector
-        nx = -dy / length
-        ny = dx / length
+        # 4. Right wall (East)
+        wall_e = create_cube(f"Wall_E_{room['id']}", (x2, cy, wall_height/2), (wall_thickness, size_y + wall_thickness, wall_height), materials['wall'])
+        wall_objs.append((wall_e, x2, cy))
         
-        # 4 corners of the wall base quad
-        v0 = (x1 - nx * wall_thickness / 2, y1 - ny * wall_thickness / 2)
-        v1 = (x2 - nx * wall_thickness / 2, y2 - ny * wall_thickness / 2)
-        v2 = (x2 + nx * wall_thickness / 2, y2 + ny * wall_thickness / 2)
-        v3 = (x1 + nx * wall_thickness / 2, y1 + ny * wall_thickness / 2)
+        # 5. Top wall (North)
+        wall_n = create_cube(f"Wall_N_{room['id']}", (cx, y2, wall_height/2), (size_x + wall_thickness, wall_thickness, wall_height), materials['wall'])
+        wall_objs.append((wall_n, cx, y2))
         
-        # Construct raw 2D mesh
-        mesh = bpy.data.meshes.new(name=f"WallMesh_{idx}")
-        wall_obj = bpy.data.objects.new(f"Wall_{idx}", mesh)
-        bpy.context.collection.objects.link(wall_obj)
-        
-        vertices = [
-            (v0[0], v0[1], 0.0),
-            (v1[0], v1[1], 0.0),
-            (v2[0], v2[1], 0.0),
-            (v3[0], v3[1], 0.0),
-        ]
-        faces = [(0, 1, 2, 3)]
-        mesh.from_pydata(vertices, [], faces)
-        mesh.update()
-        
-        # Select and go into Edit Mode to use extrude region operator
-        bpy.ops.object.select_all(action='DESELECT')
-        bpy.context.view_layer.objects.active = wall_obj
-        wall_obj.select_set(True)
-        
-        bpy.ops.object.mode_set(mode='EDIT')
-        bpy.ops.mesh.select_all(action='SELECT')
-        # STEP 3 Wall extrusion
-        bpy.ops.mesh.extrude_region_move(
-            TRANSFORM_OT_translate={"value": (0, 0, wall_height)}
-        )
-        bpy.ops.object.mode_set(mode='OBJECT')
-        
-        # Assign material
-        wall_obj.data.materials.append(materials['wall'])
-        wall_objs.append((wall_obj, (x1 + x2)/2, (y1 + y2)/2))
+        # 6. Bottom wall (South)
+        wall_s = create_cube(f"Wall_S_{room['id']}", (cx, y1, wall_height/2), (size_x + wall_thickness, wall_thickness, wall_height), materials['wall'])
+        wall_objs.append((wall_s, cx, y1))
 
     # Helper function to find closest wall to place Boolean openings
     def find_closest_wall(cx, cy):
@@ -628,6 +597,42 @@ def build_floorplan_3d(layout_data: dict, output_dir: str):
             vanity_x = x2 - wall_thickness - vanity_w/2
             create_cube("VanityCabinet", (vanity_x, cy, vanity_h/2), (vanity_w, vanity_d, vanity_h), materials['kitchen_surface'], None)
             create_cube("VanitySink", (vanity_x, cy, vanity_h + 0.01), (vanity_w - 0.1, vanity_d - 0.1, 0.04), materials['toilet_material'], None)
+            
+        else:
+            # DYNAMIC CUSTOM ROOM TYPE: Generic procedural furniture blocks based on taxonomy
+            canonical = resolve_room_type(room_type)
+            meta = get_room_meta(canonical)
+            furniture_list = meta.get("furniture", [])
+            
+            if furniture_list:
+                bpy.ops.object.empty_add(type='PLAIN_AXES', location=(cx, cy, 0.0))
+                room_group = bpy.context.active_object
+                room_group.name = f"DynamicSet_{room['id']}"
+                
+                n = len(furniture_list)
+                cols = min(n, 3)
+                rows = (n + cols - 1) // cols
+                
+                cell_w = (room_w - wall_thickness * 2) / (cols + 1)
+                cell_l = (room_l - wall_thickness * 2) / (rows + 1)
+                
+                # Create a generic material based on the room's hex color
+                hex_color = meta.get("hex_color", "#e2e8f0").lstrip('#')
+                r, g, b = tuple(int(hex_color[i:i+2], 16)/255.0 for i in (0, 2, 4))
+                gen_mat = create_principled_material(f"Mat_{canonical}", (r, g, b, 1.0), roughness=0.6)
+                
+                for idx, item in enumerate(furniture_list):
+                    col = idx % cols
+                    row = idx // cols
+                    
+                    fx = x1 + wall_thickness + (col + 0.5) * cell_w
+                    fy = y1 + wall_thickness + (row + 0.5) * cell_l
+                    
+                    fw = min(0.8, cell_w * 0.6)
+                    fl = min(0.8, cell_l * 0.6)
+                    fh = 0.6 # default generic height
+                    
+                    create_cube(f"Item_{item}", (fx, fy, fh/2), (fw, fl, fh), gen_mat, room_group)
 
     # ==========================================
     # 5. PROCEDURAL ROOF GENERATION
@@ -705,11 +710,13 @@ def build_floorplan_3d(layout_data: dict, output_dir: str):
     # 6. LIGHTING & ENVIRONMENT
     # ==========================================
     # Global soft sunlight
+    # Global soft sunlight for realistic architectural shadows
     bpy.ops.object.light_add(type='SUN', location=(15.0, -15.0, 20.0))
     sun = bpy.context.active_object
     sun.name = "Sunlight"
-    sun.data.energy = 4.2
-    sun.data.color = (1.0, 0.98, 0.93)  # Soft warm afternoon sun
+    sun.data.energy = 5.0  # Increased for brighter, professional look
+    sun.data.color = (1.0, 0.96, 0.90)  # Enhanced soft warm afternoon sun
+    sun.data.angle = math.radians(10.0) # Softer shadow edges
     sun.rotation_euler = (math.radians(45), 0.0, math.radians(45))
     if hasattr(sun.data, "use_shadow"):
         sun.data.use_shadow = True

@@ -1,151 +1,268 @@
 import re
+import math
 from typing import Dict, Any, List
-from transformers import AutoTokenizer
+
+from services.room_taxonomy import (
+    ROOM_TAXONOMY,
+    ZONE_ADJACENCY,
+    resolve_room_type,
+    get_room_meta,
+    list_all_types,
+    synthesize_unknown_room,
+)
+
 
 class NLPService:
+    """
+    Semantic NLP parser that converts a natural-language architectural prompt into
+    a structured room graph, using the dynamic room taxonomy engine.
+
+    Supports:
+    - All rooms defined in ROOM_TAXONOMY (30+ types)
+    - Semantic aliases  (e.g. 'safe room' → panic_room)
+    - Plural counts    (e.g. '3 bedrooms')
+    - Fully unknown rooms (e.g. 'meditation room') → synthesised dynamically
+    - Area/dimension heuristics
+    - Style extraction
+    """
+
+    # ── Tokenisation fallback (no HuggingFace required) ──────────────────────
     def __init__(self):
-        # Proactively load a tiny tokenizer locally for realistic pipeline feel
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased", local_files_only=True)
+            from transformers import AutoTokenizer
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                "bert-base-uncased", local_files_only=True
+            )
         except Exception as e:
-            print(f"HuggingFace offline or unavailable, tokenizing locally with simple regex fallback: {e}")
+            print(f"[NLP] HuggingFace offline – using regex tokeniser: {e}")
             self.tokenizer = None
 
-    def extract_architecture_details(self, prompt: str) -> Dict[str, Any]:
-        """Parses a natural language prompt and extracts rooms, connections, constraints and styles."""
-        # Baseline structure
-        result = {
-            "rooms": [],
-            "relationships": [],
-            "constraints": [],
-            "dimensions": {"width": 12.0, "height": 10.0, "area": 120.0},
-            "style": "modern"
-        }
+    # ── Helpers ───────────────────────────────────────────────────────────────
 
-        # 1. Tokenize prompt to simulate BERT model intake
+    def _tokenize(self, text: str) -> List[str]:
+        """Lightweight fallback tokeniser."""
         if self.tokenizer:
             try:
-                tokens = self.tokenizer.tokenize(prompt)
-                # In real code, we would run a BERT NER model over the tokens:
-                # model(tokens) -> extract labels like B-ROOM, I-ROOM, etc.
+                return self.tokenizer.tokenize(text)
             except Exception:
                 pass
+        return re.findall(r"[a-z0-9']+", text.lower())
 
-        # 2. Extract Style
-        prompt_lower = prompt.lower()
-        styles = ["modern", "minimalist", "classic", "scandinavian", "industrial", "rustical", "victorian"]
+    def _extract_style(self, prompt_lower: str) -> str:
+        styles = [
+            "modern", "minimalist", "classic", "scandinavian",
+            "industrial", "rustic", "victorian", "contemporary",
+            "art deco", "mediterranean",
+        ]
         for style in styles:
             if style in prompt_lower:
-                result["style"] = style
-                break
+                return style
+        return "modern"
 
-        # 3. Extract Rooms with sensible heuristics
-        # Standard rooms mapping
-        target_types = {
-            "bedroom": ["bedroom", "bed room", "bed"],
-            "bathroom": ["bathroom", "bath room", "bath", "restroom", "wc"],
-            "kitchen": ["kitchen", "cookhouse"],
-            "living_room": ["living room", "living_room", "parlor", "salon", "lounge"],
-            "garage": ["garage", "parking"],
-            "balcony": ["balcony", "veranda"],
-            "corridor": ["corridor", "hallway"],
-            "dining_room": ["dining room", "dining_room"]
-        }
-        
-        rooms_to_add = []
-        
-        # Color mapping for beautiful architectural aesthetics
-        color_map = {
-            "bedroom": [180, 220, 255],      # Soft Blue
-            "bathroom": [180, 255, 220],     # Soft Green
-            "kitchen": [255, 255, 200],      # Soft Yellow
-            "living_room": [255, 200, 200],  # Soft Red/Coral
-            "garage": [230, 230, 230],       # Soft Grey
-            "balcony": [255, 225, 180],      # Soft Orange
-            "corridor": [245, 245, 245],     # Very light grey
-            "dining_room": [235, 210, 255]   # Soft Purple
-        }
-
-        area_map = {
-            "bedroom": 16.0,
-            "bathroom": 8.0,
-            "kitchen": 15.0,
-            "living_room": 25.0,
-            "garage": 18.0,
-            "balcony": 8.0,
-            "corridor": 6.0,
-            "dining_room": 12.0
-        }
-
-        for room_type, syns in target_types.items():
-            count = 0
-            found = False
-            for syn in syns:
-                match = re.search(rf"(\d+)\s*-?\s*{syn}s?\b", prompt_lower)
-                if match:
-                    count = max(count, int(match.group(1)))
-                    found = True
-                elif syn in prompt_lower:
-                    found = True
-            
-            # If a synonym is matched in the prompt but without a leading digit, default is 1
-            if found and count == 0:
-                count = 1
-                
-            for i in range(count):
-                name = f"{room_type}_{i+1}" if count > 1 else room_type
-                rooms_to_add.append({
-                    "id": name,
-                    "type": room_type,
-                    "min_area": area_map[room_type],
-                    "color": color_map[room_type]
-                })
-
-        # Core fallback: if list is empty, put standard house set
-        if not rooms_to_add:
-            rooms_to_add = [
-                {"id": "living_room", "type": "living_room", "min_area": 25.0, "color": [255, 200, 200]},
-                {"id": "kitchen", "type": "kitchen", "min_area": 15.0, "color": [255, 255, 200]},
-                {"id": "bedroom", "type": "bedroom", "min_area": 16.0, "color": [180, 220, 255]},
-                {"id": "bathroom", "type": "bathroom", "min_area": 8.0, "color": [180, 255, 220]},
-                {"id": "corridor", "type": "corridor", "min_area": 6.0, "color": [240, 240, 240]}
-            ]
-
-        result["rooms"] = rooms_to_add
-
-        # 4. Generate Spatial Adjacency Relationships
-        # Build logical connections between rooms (e.g. kitchen adjacent to dining, corridor to rooms)
-        rooms_list = [r["id"] for r in rooms_to_add]
-        
-        # Connect everything through a central corridor if it exists
-        has_corridor = "corridor" in rooms_list
-        corridor_id = "corridor" if has_corridor else rooms_list[0]
-        
-        relationships = []
-        for r_id in rooms_list:
-            if r_id != corridor_id:
-                relationships.append([corridor_id, r_id])
-                
-        # Additional logical connection: Kitchen to Living Room
-        if "kitchen" in rooms_list and "living_room" in rooms_list:
-            relationships.append(["kitchen", "living_room"])
-
-        result["relationships"] = relationships
-
-        # 5. Dimensions Heuristics
-        # If user specified something like "150 sq meters"
-        area_match = re.search(r"(\d+)\s*(sq\s*m|sqm|square\s*feet|sq\s*ft|sqft)", prompt_lower)
+    def _extract_dimensions(self, prompt_lower: str) -> Dict[str, float]:
+        dims = {"width": 12.0, "height": 10.0, "area": 120.0}
+        area_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(sq\s*m|sqm|square\s*meters?|square\s*feet|sq\s*ft|sqft)",
+            prompt_lower,
+        )
         if area_match:
             val = float(area_match.group(1))
-            if "feet" in area_match.group(2) or "ft" in area_match.group(2):
-                val = val * 0.092903  # Convert to square meters
-            result["dimensions"]["area"] = val
-            # Adjust width and height based on square root ratio
-            import math
+            unit = area_match.group(2)
+            if "feet" in unit or "ft" in unit:
+                val *= 0.092903
+            dims["area"] = val
             side = math.sqrt(val)
-            result["dimensions"]["width"] = round(side * 1.2, 1)
-            result["dimensions"]["height"] = round(side / 1.2, 1)
+            dims["width"] = round(side * 1.2, 1)
+            dims["height"] = round(side / 1.2, 1)
+        return dims
 
-        return result
+    # ── Core: dynamic room detection ─────────────────────────────────────────
+
+    def _detect_rooms(self, prompt_lower: str) -> List[Dict[str, Any]]:
+        """
+        Phase 1 – taxonomy alias scan.
+        For every canonical room type, scan all its aliases for mentions.
+        Supports leading digit counts (e.g. '3 bedrooms').
+        """
+        found: Dict[str, int] = {}   # canonical_type → count
+
+        for canonical, meta in ROOM_TAXONOMY.items():
+            aliases = sorted(meta["aliases"], key=len, reverse=True)  # longest first
+            for alias in aliases:
+                # Try "N alias(s)" pattern first
+                pattern = rf"(\d+)\s*-?\s*{re.escape(alias)}s?\b"
+                match = re.search(pattern, prompt_lower)
+                if match:
+                    cnt = int(match.group(1))
+                    found[canonical] = max(found.get(canonical, 0), cnt)
+                    break
+                elif alias in prompt_lower:
+                    found[canonical] = max(found.get(canonical, 0), 1)
+                    break
+
+        return found
+
+    def _detect_unknown_rooms(self, prompt_lower: str, already_found: Dict[str, int]) -> Dict[str, int]:
+        """
+        Phase 2 – catch custom/unknown room names not in taxonomy.
+        Heuristic: look for '<word(s)> room' or 'room for <purpose>' patterns.
+        """
+        extra: Dict[str, int] = {}
+
+        _STOP = {
+            "a", "an", "the", "this", "that", "my", "our", "some", "with",
+            "and", "or", "build", "create", "design", "add", "house", "home",
+        }
+        # Pattern A: 1-3 word prefix before "room"
+        matches = re.findall(r"\b(\w+(?:\s+\w+){0,2})\s+room\b", prompt_lower)
+        for raw in matches:
+            raw = raw.strip()
+            if any(tok in _STOP for tok in raw.split()):
+                continue
+            canonical = resolve_room_type(raw + " room")
+            if canonical not in already_found and canonical not in ROOM_TAXONOMY:
+                synthesize_unknown_room(canonical, prompt_lower)
+                extra[canonical] = 1
+
+        # Pattern B: digit + 1-2 word noun + "room(s)"
+        matches2 = re.findall(r"(\d+)\s+(\w+(?:\s+\w+)?)\s+rooms?\b", prompt_lower)
+        for cnt_str, raw in matches2:
+            raw = raw.strip()
+            canonical = resolve_room_type(raw + " room")
+            if canonical not in already_found and canonical not in ROOM_TAXONOMY:
+                synthesize_unknown_room(canonical, prompt_lower)
+                extra[canonical] = max(extra.get(canonical, 0), int(cnt_str))
+
+        return extra
+
+    def _build_room_list(self, found: Dict[str, int]) -> List[Dict[str, Any]]:
+        """Convert found dict → list of room node dicts with full taxonomy metadata."""
+        rooms = []
+        for canonical, count in found.items():
+            meta = get_room_meta(canonical)
+            for i in range(count):
+                node_id = f"{canonical}_{i + 1}" if count > 1 else canonical
+                rooms.append({
+                    "id": node_id,
+                    "type": canonical,
+                    "zone": meta["zone"],
+                    "min_area": meta["min_area"],
+                    "weight": meta["weight"],
+                    "color": meta["color"],
+                    "hex_color": meta["hex_color"],
+                    "label": meta["label"],
+                    "windows": meta["windows"],
+                    "furniture": meta["furniture"],
+                })
+        return rooms
+
+    def _build_relationships(self, rooms: List[Dict[str, Any]]) -> List[List[str]]:
+        """
+        Build spatial adjacency edges driven by ZONE_ADJACENCY rules:
+        - Rooms in compatible zones are connected.
+        - Corridor acts as a hub if present.
+        - Kitchen always adjacent to living/dining.
+        """
+        relationships: List[List[str]] = []
+        ids = [r["id"] for r in rooms]
+
+        # Find corridor hub
+        corridor_ids = [r["id"] for r in rooms if r["type"] in ("corridor", "hallway")]
+        hub = corridor_ids[0] if corridor_ids else None
+
+        # Zone-driven connections
+        connected = set()
+
+        for i, r1 in enumerate(rooms):
+            for j, r2 in enumerate(rooms):
+                if i >= j:
+                    continue
+                pair = (r1["id"], r2["id"])
+                if pair in connected:
+                    continue
+
+                z1 = r1["zone"]
+                z2 = r2["zone"]
+                compatible = z2 in ZONE_ADJACENCY.get(z1, []) or z1 in ZONE_ADJACENCY.get(z2, [])
+
+                # Corridor connects to everything
+                if r1["type"] in ("corridor", "hallway") or r2["type"] in ("corridor", "hallway"):
+                    compatible = True
+
+                if compatible:
+                    relationships.append([r1["id"], r2["id"]])
+                    connected.add(pair)
+
+        # Guarantee kitchen ↔ dining/living connections
+        kitchen_ids = [r["id"] for r in rooms if r["type"] == "kitchen"]
+        social_ids = [r["id"] for r in rooms if r["type"] in ("living_room", "dining_room")]
+        for k in kitchen_ids:
+            for s in social_ids:
+                pair = tuple(sorted([k, s]))
+                if pair not in connected:
+                    relationships.append([k, s])
+                    connected.add(pair)
+
+        # Panic/security rooms connect only to private/corridor
+        for r in rooms:
+            if r["zone"] == "security":
+                for r2 in rooms:
+                    if r2["zone"] in ("private",) or r2["type"] in ("corridor", "hallway"):
+                        pair = tuple(sorted([r["id"], r2["id"]]))
+                        if pair not in connected:
+                            relationships.append([r["id"], r2["id"]])
+                            connected.add(pair)
+
+        return relationships
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def extract_architecture_details(self, prompt: str) -> Dict[str, Any]:
+        """
+        Parses a natural-language prompt and returns structured architectural data
+        with full support for dynamic/custom room types via the taxonomy engine.
+        """
+        prompt_lower = prompt.lower()
+
+        # Tokenise (simulate BERT intake)
+        self._tokenize(prompt_lower)
+
+        # 1. Style
+        style = self._extract_style(prompt_lower)
+
+        # 2. Dimensions
+        dimensions = self._extract_dimensions(prompt_lower)
+
+        # 3. Room detection — Phase 1: taxonomy-driven
+        found = self._detect_rooms(prompt_lower)
+
+        # 4. Room detection — Phase 2: unknown/custom rooms
+        extra = self._detect_unknown_rooms(prompt_lower, found)
+        found.update(extra)
+
+        # 5. Fallback: no rooms detected → standard house
+        if not found:
+            found = {
+                "living_room": 1,
+                "kitchen": 1,
+                "bedroom": 1,
+                "bathroom": 1,
+                "corridor": 1,
+            }
+
+        # 6. Build node list
+        rooms = self._build_room_list(found)
+
+        # 7. Spatial adjacency graph
+        relationships = self._build_relationships(rooms)
+
+        return {
+            "rooms": rooms,
+            "relationships": relationships,
+            "constraints": [],
+            "dimensions": dimensions,
+            "style": style,
+        }
+
 
 nlp_service = NLPService()
