@@ -2,10 +2,18 @@ import math
 import random
 import io
 import json
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 
 from services.room_taxonomy import resolve_room_type, get_room_meta, ZONE_ADJACENCY
+
+# Layout constants
+MIN_ROOM_DIM_PX = 75        # Minimum room dimension in pixels
+WALL_THICKNESS_PX = 8       # Wall draw thickness in pixels
+CORRIDOR_WIDTH_PX = 45      # Approx 0.9 m at default scale
+DEFAULT_CANVAS_W = 800
+DEFAULT_CANVAS_H = 600
+DEFAULT_SCALE_PX_PER_M = 50
 
 class LayoutGenerationService:
 
@@ -54,8 +62,18 @@ class LayoutGenerationService:
 
         return zones
 
-    def _partition_rooms(self, rooms_list: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        """Greedily balances rooms into two lists of roughly equal weights for balanced BSP partitioning."""
+    def _partition_rooms(self, rooms_list: List[Dict[str, Any]], canvas_w: int = DEFAULT_CANVAS_W, canvas_h: int = DEFAULT_CANVAS_H) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Splits rooms into two groups. Uses x_rel/y_rel spring-layout coordinates when available, falling back to greedy weight-balance."""
+        has_coords = all("x_rel" in r and "y_rel" in r for r in rooms_list)
+        if has_coords and len(rooms_list) >= 2:
+            # Sort along dominant axis (wider canvas → sort by x, taller → sort by y)
+            if canvas_w >= canvas_h:
+                sorted_rooms = sorted(rooms_list, key=lambda r: r.get("x_rel", 0.0))
+            else:
+                sorted_rooms = sorted(rooms_list, key=lambda r: r.get("y_rel", 0.0))
+            mid = len(sorted_rooms) // 2
+            return sorted_rooms[:mid], sorted_rooms[mid:]
+        # Fallback: greedy weight-balance
         sorted_rooms = sorted(rooms_list, key=lambda r: self._get_room_weight(r.get("id", "")), reverse=True)
         g1, g2 = [], []
         w1, w2 = 0.0, 0.0
@@ -81,8 +99,8 @@ class LayoutGenerationService:
             split_pos = end - min_dim
         return split_pos
 
-    def _subdivide(self, box: List[int], rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Recursive Binary Space Partitioning (BSP) subdivisions for room cells."""
+    def _subdivide(self, box: List[int], rooms: List[Dict[str, Any]], canvas_w: int = DEFAULT_CANVAS_W, canvas_h: int = DEFAULT_CANVAS_H) -> List[Dict[str, Any]]:
+        """Recursive Binary Space Partitioning (BSP) subdivisions for room cells. Prefers split axis aligned with highest x_rel/y_rel variance."""
         if not rooms:
             return []
             
@@ -91,11 +109,11 @@ class LayoutGenerationService:
             room["box"] = box
             return [room]
             
-        g1, g2 = self._partition_rooms(rooms)
+        g1, g2 = self._partition_rooms(rooms, canvas_w, canvas_h)
         if not g1:
-            return self._subdivide(box, g2)
+            return self._subdivide(box, g2, canvas_w, canvas_h)
         if not g2:
-            return self._subdivide(box, g1)
+            return self._subdivide(box, g1, canvas_w, canvas_h)
             
         w = box[2] - box[0]
         h = box[3] - box[1]
@@ -104,25 +122,36 @@ class LayoutGenerationService:
         w2 = sum(self._get_room_weight(r.get("id", "")) for r in g2)
         ratio = w1 / (w1 + w2) if (w1 + w2) > 0 else 0.5
         ratio = max(0.3, min(0.7, ratio))
+
+        # Choose split axis: prefer axis with higher x_rel/y_rel variance when coords are present
+        has_coords = all("x_rel" in r and "y_rel" in r for r in rooms)
+        if has_coords:
+            x_vals = [r["x_rel"] for r in rooms]
+            y_vals = [r["y_rel"] for r in rooms]
+            mean_x = sum(x_vals) / len(x_vals)
+            mean_y = sum(y_vals) / len(y_vals)
+            var_x = sum((v - mean_x) ** 2 for v in x_vals)
+            var_y = sum((v - mean_y) ** 2 for v in y_vals)
+            split_horizontal = var_x >= var_y  # higher x variance → split vertically (divide left/right)
+        else:
+            split_horizontal = w > h
         
         # Decide if we should inject a corridor slice for circulation (only for large groups)
         insert_corridor = len(rooms) >= 3 and min(w, h) > 160
         
         if insert_corridor:
-            corr_size = 45  # ~0.9 meters
-            if w > h:
-                # Horizontal corridor running perpendicular through vertical room slices
+            corr_size = CORRIDOR_WIDTH_PX  # ~0.9 meters
+            if split_horizontal:
                 corr_box = [box[0], box[1] + (h - corr_size) // 2, box[2], box[1] + (h - corr_size) // 2 + corr_size]
                 box_top = [box[0], box[1], box[2], corr_box[1]]
                 box_bottom = [box[0], corr_box[3], box[2], box[3]]
                 
-                # Check for explicit corridor in rooms
                 corridor_node = None
                 for r in rooms:
                     if self._get_base_type(r.get("id", "")) in ["corridor", "hallway"]:
                         corridor_node = r.copy()
                         rooms.remove(r)
-                        g1, g2 = self._partition_rooms(rooms)
+                        g1, g2 = self._partition_rooms(rooms, canvas_w, canvas_h)
                         break
                         
                 if not corridor_node:
@@ -135,12 +164,11 @@ class LayoutGenerationService:
                 
                 res = [corridor_node]
                 if g1:
-                    res.extend(self._subdivide(box_top, g1))
+                    res.extend(self._subdivide(box_top, g1, canvas_w, canvas_h))
                 if g2:
-                    res.extend(self._subdivide(box_bottom, g2))
+                    res.extend(self._subdivide(box_bottom, g2, canvas_w, canvas_h))
                 return res
             else:
-                # Vertical corridor split
                 corr_box = [box[0] + (w - corr_size) // 2, box[1], box[0] + (w - corr_size) // 2 + corr_size, box[3]]
                 box_left = [box[0], box[1], corr_box[0], box[3]]
                 box_right = [corr_box[2], box[1], box[2], box[3]]
@@ -150,7 +178,7 @@ class LayoutGenerationService:
                     if self._get_base_type(r.get("id", "")) in ["corridor", "hallway"]:
                         corridor_node = r.copy()
                         rooms.remove(r)
-                        g1, g2 = self._partition_rooms(rooms)
+                        g1, g2 = self._partition_rooms(rooms, canvas_w, canvas_h)
                         break
                         
                 if not corridor_node:
@@ -163,28 +191,27 @@ class LayoutGenerationService:
                 
                 res = [corridor_node]
                 if g1:
-                    res.extend(self._subdivide(box_left, g1))
+                    res.extend(self._subdivide(box_left, g1, canvas_w, canvas_h))
                 if g2:
-                    res.extend(self._subdivide(box_right, g2))
+                    res.extend(self._subdivide(box_right, g2, canvas_w, canvas_h))
                 return res
         else:
-            # Standard split without corridor
-            if w > h:
-                split_x = self._get_safe_split_pos(box[0], box[2], ratio, min_dim=75)
+            if split_horizontal:
+                split_x = self._get_safe_split_pos(box[0], box[2], ratio, min_dim=MIN_ROOM_DIM_PX)
                 box1 = [box[0], box[1], split_x, box[3]]
                 box2 = [split_x, box[1], box[2], box[3]]
-                return self._subdivide(box1, g1) + self._subdivide(box2, g2)
+                return self._subdivide(box1, g1, canvas_w, canvas_h) + self._subdivide(box2, g2, canvas_w, canvas_h)
             else:
-                split_y = self._get_safe_split_pos(box[1], box[3], ratio, min_dim=75)
+                split_y = self._get_safe_split_pos(box[1], box[3], ratio, min_dim=MIN_ROOM_DIM_PX)
                 box1 = [box[0], box[1], box[2], split_y]
                 box2 = [box[0], split_y, box[2], box[3]]
-                return self._subdivide(box1, g1) + self._subdivide(box2, g2)
+                return self._subdivide(box1, g1, canvas_w, canvas_h) + self._subdivide(box2, g2, canvas_w, canvas_h)
 
-    def _subdivide_zone(self, box: List[int], rooms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _subdivide_zone(self, box: List[int], rooms: List[Dict[str, Any]], canvas_w: int = DEFAULT_CANVAS_W, canvas_h: int = DEFAULT_CANVAS_H) -> List[Dict[str, Any]]:
         """Subdivides a specific architectural zone boundary into its constituent rooms."""
         if not rooms:
             return []
-        return self._subdivide(box, rooms)
+        return self._subdivide(box, rooms, canvas_w, canvas_h)
 
     def _merge_segments(self, segments: List[Tuple[int, int, int, bool]]) -> List[Tuple[int, int, int, bool]]:
         """Merges collinear overlapping or touching wall intervals into clean continuous lines."""
@@ -208,14 +235,20 @@ class LayoutGenerationService:
             merged.append((coord, curr_start, curr_end, curr_ext))
         return merged
 
-    def _generate_candidate(self, nodes: List[Dict[str, Any]], relationships: List[Any], prompt_style: str, seed: int) -> Dict[str, Any]:
-        """Generates a high-quality coordinate layout candidate using Binary Space Partitioning and zoning."""
+    def _generate_candidate(self, nodes: List[Dict[str, Any]], relationships: List[Any], prompt_style: str, seed: int, dimensions: Optional[dict] = None) -> Dict[str, Any]:
+        """Generates a layout candidate using Binary Space Partitioning and zoning. Canvas dimensions are driven by NLP-extracted real-world dimensions when provided."""
         random.seed(seed)
         np.random.seed(seed)
         
         # 1. Zoning
         zones = self._classify_zoning(nodes)
         
+        # Sort nodes within each zone by x_rel/y_rel so spatially adjacent rooms end up adjacent in the BSP tree
+        has_coords = all("x_rel" in n and "y_rel" in n for n in nodes)
+        if has_coords:
+            for zone_name in zones:
+                zones[zone_name].sort(key=lambda n: (n.get("x_rel", 0.0), n.get("y_rel", 0.0)))
+
         active_zones = {}
         for zone_name, zone_nodes in zones.items():
             if zone_nodes:
@@ -224,11 +257,26 @@ class LayoutGenerationService:
                     "nodes": zone_nodes,
                     "weight": weight_sum
                 }
-                
-        # 2. Outer Building boundary settings
-        master_width = 800
-        master_height = 600
-        scale = 50
+
+        # 2. Outer Building boundary settings — driven by NLP dimensions or room-count dynamic scaling
+        if dimensions and dimensions.get("width") and dimensions.get("height"):
+            base_scale = DEFAULT_SCALE_PX_PER_M
+            target_px_w = dimensions["width"] * base_scale
+            target_px_h = dimensions["height"] * base_scale
+            master_width = max(600, min(1600, int(target_px_w)))
+            master_height = max(500, min(1200, int(target_px_h)))
+            scale = master_width / dimensions["width"]
+        else:
+            # Dynamic scaling: assume average 14 sqm per room cell
+            n_rooms = max(1, len(nodes))
+            target_area_m2 = n_rooms * 14.0
+            # Assume a comfortable aspect ratio of 1.33
+            w_m = math.sqrt(target_area_m2 * 1.33)
+            h_m = target_area_m2 / w_m
+            
+            master_width = max(700, min(1400, int(w_m * DEFAULT_SCALE_PX_PER_M)))
+            master_height = max(550, min(1000, int(h_m * DEFAULT_SCALE_PX_PER_M)))
+            scale = DEFAULT_SCALE_PX_PER_M
         
         margin_x = random.randint(70, 95)
         margin_y = random.randint(70, 95)
@@ -241,11 +289,27 @@ class LayoutGenerationService:
         if total_active_weight == 0:
             total_active_weight = 1.0
             
-        # 3. First-Level Subdivision — use all active zones in ZONE_ADJACENCY order
-        zone_order = ["public", "private", "service", "utility", "recreation", "security"]
+        # 3. First-Level Subdivision — sort active zones by their average spring-layout centers along dominant axis
+        has_coords = all("x_rel" in n and "y_rel" in n for n in nodes)
+        for zone_name, zone_info in active_zones.items():
+            z_nodes = zone_info["nodes"]
+            if has_coords:
+                zone_info["x_center"] = sum(n.get("x_rel", 0.0) for n in z_nodes) / len(z_nodes)
+                zone_info["y_center"] = sum(n.get("y_rel", 0.0) for n in z_nodes) / len(z_nodes)
+            else:
+                zone_info["x_center"] = 0.0
+                zone_info["y_center"] = 0.0
+
         zone_boxes = {}
         remaining_box = [bx1, by1, bx2, by2]
-        sorted_zone_names = [z for z in zone_order if z in active_zones]
+        
+        # Determine dominant axis of whole canvas
+        w_canvas = bx2 - bx1
+        h_canvas = by2 - by1
+        if w_canvas >= h_canvas:
+            sorted_zone_names = sorted(list(active_zones.keys()), key=lambda z: active_zones[z]["x_center"])
+        else:
+            sorted_zone_names = sorted(list(active_zones.keys()), key=lambda z: active_zones[z]["y_center"])
         
         for idx, zone_name in enumerate(sorted_zone_names):
             if idx == len(sorted_zone_names) - 1:
@@ -275,7 +339,7 @@ class LayoutGenerationService:
         for zone_name, zone_info in active_zones.items():
             zbox = zone_boxes[zone_name]
             znodes = zone_info["nodes"]
-            placed_rooms = self._subdivide_zone(zbox, znodes)
+            placed_rooms = self._subdivide_zone(zbox, znodes, master_width, master_height)
             rooms_layout.extend(placed_rooms)
             
         node_lookup = {n["id"]: n for n in nodes}
@@ -453,7 +517,7 @@ class LayoutGenerationService:
                 "is_entrance": True
             })
             
-        # 7. Exterior Windows placement based on taxonomy windows preference
+        # 7. Exterior Windows placement based on taxonomy, room function, and optimal solar orientations
         windows = []
         for room in rooms_layout:
             r_id = room["id"]
@@ -461,45 +525,51 @@ class LayoutGenerationService:
             meta = get_room_meta(canonical)
             win_pref = meta.get("windows", "partial")
             if win_pref == "none":
-                continue  # Security/theater rooms get no windows
+                continue  # Security/theater/utility rooms get no windows
             if canonical in ["corridor", "hallway", "garage"]:
                 continue
                 
             x1, y1, x2, y2 = room["box"]
-            # Full windows: place on all exterior faces
-            # Partial windows: place on one face only
-            # Minimal: only if room is on top/bottom exterior
-            faces_added = 0
-            max_faces = {"full": 4, "partial": 2, "minimal": 1}.get(win_pref, 2)
-
-            if abs(y1 - by1) < 5 and faces_added < max_faces:
+            
+            # Determine potential window faces (exterior check)
+            # South: y1 near by1, North: y2 near by2, West: x1 near bx1, East: x2 near bx2
+            faces = []
+            if abs(y1 - by1) < 5:
+                faces.append(("south", [x1 + int((x2 - x1) * 0.25), y1, x1 + int((x2 - x1) * 0.75), y1]))
+            if abs(y2 - by2) < 5:
+                faces.append(("north", [x1 + int((x2 - x1) * 0.25), y2, x1 + int((x2 - x1) * 0.75), y2]))
+            if abs(x1 - bx1) < 5:
+                faces.append(("west", [bx1, y1 + int((y2 - y1) * 0.25), bx1, y1 + int((y2 - y1) * 0.75)]))
+            if abs(x2 - bx2) < 5:
+                faces.append(("east", [bx2, y1 + int((y2 - y1) * 0.25), bx2, y1 + int((y2 - y1) * 0.75)]))
+                
+            if not faces:
+                continue
+                
+            # Rank orientations: South (100% gain) > East/West (75% gain) > North (40% gain)
+            # Rank functions: Living room wants South/East/West. Bathrooms want North/privacy.
+            if canonical in ["bathroom", "toilet", "powder_room"]:
+                # Bathrooms prefer North for diffused light, otherwise first face with small window
+                north_faces = [f for f in faces if f[0] == "north"]
+                chosen_faces = north_faces if north_faces else [faces[0]]
+                win_type = "minimal"
+            elif canonical in ["living_room", "lounge", "dining_room"]:
+                # Public spaces want large windows, South/East/West preferred
+                chosen_faces = sorted(faces, key=lambda f: {"south": 0, "east": 1, "west": 2, "north": 3}[f[0]])[:3]
+                win_type = "large"
+            else:
+                # Bedrooms and other rooms
+                chosen_faces = sorted(faces, key=lambda f: {"east": 0, "west": 1, "south": 2, "north": 3}[f[0]])[:2]
+                win_type = "standard"
+                
+            for orientation, coords in chosen_faces:
                 windows.append({
                     "room_id": r_id,
-                    "start": [x1 + int((x2 - x1) * 0.25), y1],
-                    "end": [x1 + int((x2 - x1) * 0.75), y1]
+                    "start": [coords[0], coords[1]],
+                    "end": [coords[2], coords[3]],
+                    "orientation": orientation,
+                    "type": win_type
                 })
-                faces_added += 1
-            if abs(y2 - by2) < 5 and faces_added < max_faces:
-                windows.append({
-                    "room_id": r_id,
-                    "start": [x1 + int((x2 - x1) * 0.25), y2],
-                    "end": [x1 + int((x2 - x1) * 0.75), y2]
-                })
-                faces_added += 1
-            if abs(x1 - bx1) < 5 and faces_added < max_faces:
-                windows.append({
-                    "room_id": r_id,
-                    "start": [bx1, y1 + int((y2 - y1) * 0.25)],
-                    "end": [bx1, y1 + int((y2 - y1) * 0.75)]
-                })
-                faces_added += 1
-            if abs(x2 - bx2) < 5 and faces_added < max_faces:
-                windows.append({
-                    "room_id": r_id,
-                    "start": [bx2, y1 + int((y2 - y1) * 0.25)],
-                    "end": [bx2, y1 + int((y2 - y1) * 0.75)]
-                })
-                faces_added += 1
                 
         # 8. Multi-Criteria Architecture scoring engine
         score = 100.0
@@ -595,8 +665,8 @@ class LayoutGenerationService:
         all_y1 = [r["box"][1] for r in rooms_layout]
         all_x2 = [r["box"][2] for r in rooms_layout]
         all_y2 = [r["box"][3] for r in rooms_layout]
-        env_width = max(all_x2) - min(all_x1) if all_x1 else 800
-        env_height = max(all_y2) - min(all_y1) if all_y1 else 600
+        env_width = max(all_x2) - min(all_x1) if all_x1 else master_width
+        env_height = max(all_y2) - min(all_y1) if all_y1 else master_height
         tightness = (env_width * env_height) / (master_width * master_height)
         
         return {
@@ -607,33 +677,73 @@ class LayoutGenerationService:
             "score": score,
             "aesthetic_score": min(0.98, max(0.40, score / 100.0)),
             "env_bounds": [min(all_x1) if all_x1 else 50, min(all_y1) if all_y1 else 50, max(all_x2) if all_x2 else 750, max(all_y2) if all_y2 else 550],
-            "tightness": tightness
+            "tightness": tightness,
+            "master_width": master_width,
+            "master_height": master_height,
+            "scale": scale
         }
 
-    def generate_layout(self, graph_data: Dict[str, Any], prompt_style: str) -> Dict[str, Any]:
-        """Core endpoint. Generates candidates, selects the best plan, and renders blueprint image bytes."""
+    def _anneal_layout(self, nodes: List[Dict[str, Any]], relationships: List[Any], prompt_style: str, n_iter: int = 150, dimensions: Optional[dict] = None) -> Dict[str, Any]:
+        """Simulated annealing optimizer over BSP tree. Explores seed and sibling-swap moves and returns best-scoring candidate."""
+        import math as _math
+        current = self._generate_candidate(nodes, relationships, prompt_style, 42, dimensions=dimensions)
+        best = current
+        temperature = 1.0
+        decay = 0.95
+
+        for i in range(n_iter):
+            move = random.choice(["reseed", "swap_siblings", "reseed"])
+            try:
+                if move == "reseed":
+                    new_seed = random.randint(1, 9999)
+                    candidate = self._generate_candidate(nodes, relationships, prompt_style, new_seed, dimensions=dimensions)
+                else:
+                    shuffled = list(nodes)
+                    if len(shuffled) >= 2:
+                        i1, i2 = random.sample(range(len(shuffled)), 2)
+                        shuffled[i1], shuffled[i2] = shuffled[i2], shuffled[i1]
+                    new_seed = random.randint(1, 9999)
+                    candidate = self._generate_candidate(shuffled, relationships, prompt_style, new_seed, dimensions=dimensions)
+
+                delta = candidate["score"] - current["score"]
+                if delta > 0 or random.random() < _math.exp(delta / max(temperature, 1e-6)):
+                    current = candidate
+                if current["score"] > best["score"]:
+                    best = current
+            except Exception as e:
+                print(f"[Annealing] Iteration {i} failed: {e}")
+            temperature *= decay
+
+        return best
+
+    def generate_layout(self, graph_data: Dict[str, Any], prompt_style: str, dimensions: Optional[dict] = None) -> Dict[str, Any]:
+        """Generates candidates, selects the best plan, renders blueprint image bytes. Canvas driven by NLP dimensions when provided."""
         nodes = graph_data.get("nodes", [])
         relationships = graph_data.get("edges", [])
-        
-        # 1. MULTI-LAYOUT GENERATION (Create 3 candidate floor plans via seeds)
-        candidates = []
-        seeds = [42, 108, 999]
-        for seed in seeds:
-            try:
-                candidate = self._generate_candidate(nodes, relationships, prompt_style, seed)
-                candidates.append(candidate)
-            except Exception as e:
-                print(f"[Warning] Failed candidate seed {seed}: {e}")
+
+        # 1. MULTI-LAYOUT GENERATION — simulated annealing with 3-seed fallback
+        try:
+            best = self._anneal_layout(nodes, relationships, prompt_style, n_iter=150, dimensions=dimensions)
+            candidates = [best]
+        except Exception as e:
+            print(f"[Warning] Simulated annealing failed, falling back to 3-seed search: {e}")
+            candidates = []
+            for seed in [42, 108, 999]:
+                try:
+                    candidate = self._generate_candidate(nodes, relationships, prompt_style, seed, dimensions=dimensions)
+                    candidates.append(candidate)
+                except Exception as se:
+                    print(f"[Warning] Failed candidate seed {seed}: {se}")
 
         if not candidates:
             raise ValueError("Failed to generate any valid architectural candidates.")
 
         best = max(candidates, key=lambda c: c["score"])
         
-        # 2. Render Blueprint via PIL
-        master_width = 800
-        master_height = 600
-        scale = 50
+        # 2. Render Blueprint via PIL — reuse the canvas size decided during candidate generation
+        master_width = int(best.get("master_width", DEFAULT_CANVAS_W))
+        master_height = int(best.get("master_height", DEFAULT_CANVAS_H))
+        scale = max(1, int(round(best.get("scale", DEFAULT_SCALE_PX_PER_M))))
         
         # Dynamic zoning colors from taxonomy metadata
         def _get_fill(room_id: str) -> tuple:
@@ -739,7 +849,7 @@ class LayoutGenerationService:
             "metadata": {
                 "width_px": master_width,
                 "height_px": master_height,
-                "scale_px_to_meter": scale,
+                "scale_px_to_meter": round(scale, 4),
                 "rooms": best["rooms"],
                 "walls": best["walls"],
                 "doors": best["doors"],

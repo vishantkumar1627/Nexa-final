@@ -10,8 +10,6 @@ celery>=5.3.6
 passlib[bcrypt]>=1.7.4
 python-jose[cryptography]>=3.3.0
 python-multipart>=0.0.9
-torch>=2.2.0
-transformers>=4.38.0
 opencv-python-headless>=4.9.0
 numpy>=1.26.0
 pillow>=10.2.0
@@ -22,3 +20,12 @@ httpx>=0.27.0
 python-dotenv>=1.0.1
 boto3>=1.34.0
 aiosqlite>=0.20.0
+ezdxf>=1.1.0
+
+# Supabase Storage
+supabase>=2.4.0
+
+# LLM providers (optional — only needed for LLM_PROVIDER_MODE != regex)
+openai>=1.30.0          # required if LLM_PROVIDER_MODE=openai
+anthropic>=0.25.0       # required if LLM_PROVIDER_MODE=anthropic
+google-generativeai>=0.5.0  # optional, for Gemini integration

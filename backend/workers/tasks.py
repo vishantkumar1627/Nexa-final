@@ -15,9 +15,14 @@ from services.graph_service import graph_service
 from services.layout_service import layout_service
 from services.floorplan_service import floorplan_service
 from services.storage_service import storage_service
+from services.code_validator import code_validator
 
-# Initialize Redis client for broadcasting progress updates
-redis_client = redis.Redis.from_url(settings.REDIS_URL)
+# Initialize Redis client for broadcasting progress updates (optional — offline-safe)
+try:
+    redis_client = redis.Redis.from_url(settings.REDIS_URL, socket_timeout=1.0)
+    redis_client.ping()  # test connection immediately
+except Exception:
+    redis_client = None  # Redis offline — broadcast will be skipped gracefully
 
 def broadcast_progress(job_id: str, percent: int, stage: str, status: str = "PROCESSING", error_msg: str = None):
     """Publishes progress data to a Redis Channel to sync with WebSocket clients in real-time."""
@@ -30,7 +35,8 @@ def broadcast_progress(job_id: str, percent: int, stage: str, status: str = "PRO
     }
     channel_name = f"job_progress_{job_id}"
     try:
-        redis_client.publish(channel_name, json.dumps(payload))
+        if redis_client:
+            redis_client.publish(channel_name, json.dumps(payload))
     except Exception as e:
         # Gracefully print warning instead of crashing execution flow
         print(f"[Warning] Redis offline, skipping progress broadcast: {e}")
@@ -88,9 +94,24 @@ def execute_architecture_pipeline(self, job_id: str):
         job.current_stage = "Layout Generation"
         db.commit()
 
-        layout_results = layout_service.generate_layout(graph_results, nlp_results["style"])
+        layout_results = layout_service.generate_layout(
+            graph_results,
+            nlp_results["style"],
+            dimensions=nlp_results.get("dimensions")
+        )
         image_bytes = layout_results["image_bytes"]
         layout_metadata = layout_results["metadata"]
+
+        # Validate layout against building codes and attach results
+        try:
+            violations = code_validator.validate(layout_metadata, nlp_results.get("dimensions", {}))
+            layout_metadata["code_violations"] = violations
+            for v in violations:
+                if v["level"] == "error":
+                    broadcast_progress(job_uuid, 55, f"Code Violation: {v['message'][:80]}")
+        except Exception as cv_err:
+            print(f"[Warning] Building code validation failed: {cv_err}")
+            layout_metadata["code_violations"] = []
 
         # 5. Stage 4: Floorplan Vectorization (CV Contours -> SVG / DXF)
         broadcast_progress(job_uuid, 70, "Vectorization")
@@ -139,7 +160,7 @@ def execute_architecture_pipeline(self, job_id: str):
             json.dump(layout_metadata, f)
 
         # Define 3D model outputs directory
-        local_output_dir = storage_service.get_local_path("models3d", f"model_{job_uuid}")
+        local_output_dir = os.path.abspath(storage_service.get_local_path("models3d", f"model_{job_uuid}"))
         os.makedirs(local_output_dir, exist_ok=True)
 
         blender_completed = False
@@ -162,14 +183,17 @@ def execute_architecture_pipeline(self, job_id: str):
                 stdout=subprocess.PIPE, 
                 stderr=subprocess.PIPE, 
                 text=True, 
-                timeout=300 # 5 minutes maximum timeout
+                timeout=120 # 120 seconds maximum timeout
             )
             
             if result.returncode == 0:
                 print("Blender background process completed successfully.")
+                print(f"Blender Stdout:\n{result.stdout}")
+                print(f"Blender Stderr:\n{result.stderr}")
                 blender_completed = True
             else:
                 print(f"Blender process failed with exit code {result.returncode}.")
+                print(f"Blender Stdout:\n{result.stdout}")
                 print(f"Blender Stderr:\n{result.stderr}")
         except Exception as e:
             print(f"Warning: Failed to execute Blender binary: {e}")
@@ -427,12 +451,8 @@ def execute_architecture_pipeline(self, job_id: str):
         job.current_stage = "Completed"
         db.commit()
 
-        # Clean local outputs temp folder
-        try:
-            import shutil
-            shutil.rmtree(local_output_dir)
-        except Exception:
-            pass
+        # NOTE: Do NOT delete local_output_dir here — files may still be needed
+        # for Supabase upload retries. The outputs directory is managed separately.
 
         return True
 

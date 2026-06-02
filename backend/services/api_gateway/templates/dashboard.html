@@ -944,7 +944,11 @@
         // Generate flow click trigger
         generateBtn.addEventListener("click", async () => {
             if (!token) {
-                alert("Silent authentication is still initializing. Please wait a second and click again.");
+                progressStage.innerText = "Authenticating user session...";
+                await authenticate();
+            }
+            if (!token) {
+                alert("Silent authentication failed. Please refresh the page or ensure the server is active.");
                 return;
             }
 

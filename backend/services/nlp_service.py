@@ -1,4 +1,5 @@
 import re
+import os
 import math
 from typing import Dict, Any, List
 
@@ -10,6 +11,9 @@ from services.room_taxonomy import (
     list_all_types,
     synthesize_unknown_room,
 )
+
+# Controls room extraction strategy. Options: regex (default), openai, anthropic
+LLM_PROVIDER_MODE = os.getenv("LLM_PROVIDER_MODE", "regex")
 
 
 class NLPService:
@@ -24,29 +28,13 @@ class NLPService:
     - Fully unknown rooms (e.g. 'meditation room') → synthesised dynamically
     - Area/dimension heuristics
     - Style extraction
+    - Optional LLM-backed extraction (set LLM_PROVIDER_MODE=openai|anthropic)
     """
 
-    # ── Tokenisation fallback (no HuggingFace required) ──────────────────────
     def __init__(self):
-        try:
-            from transformers import AutoTokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                "bert-base-uncased", local_files_only=True
-            )
-        except Exception as e:
-            print(f"[NLP] HuggingFace offline – using regex tokeniser: {e}")
-            self.tokenizer = None
+        pass  # No heavy tokenizer loading; LLM calls are made lazily per-request
 
     # ── Helpers ───────────────────────────────────────────────────────────────
-
-    def _tokenize(self, text: str) -> List[str]:
-        """Lightweight fallback tokeniser."""
-        if self.tokenizer:
-            try:
-                return self.tokenizer.tokenize(text)
-            except Exception:
-                pass
-        return re.findall(r"[a-z0-9']+", text.lower())
 
     def _extract_style(self, prompt_lower: str) -> str:
         styles = [
@@ -78,7 +66,7 @@ class NLPService:
 
     # ── Core: dynamic room detection ─────────────────────────────────────────
 
-    def _detect_rooms(self, prompt_lower: str) -> List[Dict[str, Any]]:
+    def _detect_rooms(self, prompt_lower: str) -> Dict[str, int]:
         """
         Phase 1 – taxonomy alias scan.
         For every canonical room type, scan all its aliases for mentions.
@@ -215,6 +203,109 @@ class NLPService:
 
         return relationships
 
+    # ── LLM-backed extraction ─────────────────────────────────────────────────
+
+    def _extract_rooms_via_llm(self, prompt: str) -> Dict[str, Any]:
+        """
+        Calls OpenAI or Anthropic to extract rooms, style, floors, and dimensions.
+        Returns an empty dict on failure so the caller can fall back to regex.
+        """
+        tool_schema = {
+            "name": "extract_floor_plan",
+            "description": "Extract architectural floor plan requirements from a user prompt.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "rooms": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string"},
+                                "count": {"type": "integer"},
+                                "special_requirements": {"type": "string"}
+                            },
+                            "required": ["type", "count"]
+                        }
+                    },
+                    "style": {"type": "string"},
+                    "num_floors": {"type": "integer"},
+                    "dimensions": {
+                        "type": "object",
+                        "properties": {
+                            "width": {"type": "number"},
+                            "height": {"type": "number"},
+                            "area": {"type": "number"}
+                        }
+                    }
+                },
+                "required": ["rooms"]
+            }
+        }
+
+        try:
+            if LLM_PROVIDER_MODE == "openai":
+                import openai
+                import json
+                api_key = os.getenv("OPENAI_API_KEY", "")
+                client = openai.OpenAI(api_key=api_key)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    tools=[{"type": "function", "function": tool_schema}],
+                    tool_choice={"type": "function", "function": {"name": "extract_floor_plan"}}
+                )
+                args = response.choices[0].message.tool_calls[0].function.arguments
+                return json.loads(args)
+
+            elif LLM_PROVIDER_MODE == "anthropic":
+                import anthropic, json
+                api_key = os.getenv("CLAUDE_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
+                client = anthropic.Anthropic(api_key=api_key)
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",   # confirmed available 2026-06
+                    max_tokens=1024,
+                    tools=[{
+                        "name": tool_schema["name"],
+                        "description": tool_schema["description"],
+                        "input_schema": tool_schema["parameters"]
+                    }],
+                    messages=[{"role": "user", "content": prompt}]
+                )
+                for block in response.content:
+                    if block.type == "tool_use":
+                        return block.input
+
+            elif LLM_PROVIDER_MODE == "gemini":
+                import json, urllib.request, urllib.parse
+                api_key = os.getenv("GEMINI_API_KEY", "")
+                system_msg = (
+                    "You are an architectural assistant. Given a free-text description of a house, "
+                    "return ONLY a valid JSON object matching this schema (no markdown, no explanation):\n"
+                    f"{json.dumps(tool_schema['parameters'], indent=2)}"
+                )
+                payload = {
+                    "contents": [{"parts": [{"text": f"{system_msg}\n\nPrompt: {prompt}"}]}],
+                    "generationConfig": {"responseMimeType": "application/json"}
+                }
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/"
+                    f"models/gemini-2.5-flash:generateContent?key={api_key}"
+                )
+                req = urllib.request.Request(
+                    url, data=json.dumps(payload).encode(), method="POST",
+                    headers={"Content-Type": "application/json"}
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read())
+                text = body["candidates"][0]["content"]["parts"][0]["text"]
+                return json.loads(text)
+
+        except Exception as e:
+            print(f"[NLP] LLM extraction failed ({LLM_PROVIDER_MODE}): {e}. Falling back to regex.")
+
+        return {}
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def extract_architecture_details(self, prompt: str) -> Dict[str, Any]:
@@ -224,23 +315,39 @@ class NLPService:
         """
         prompt_lower = prompt.lower()
 
-        # Tokenise (simulate BERT intake)
-        self._tokenize(prompt_lower)
-
         # 1. Style
         style = self._extract_style(prompt_lower)
 
-        # 2. Dimensions
+        # 2. Dimensions (regex always runs; LLM result may override)
         dimensions = self._extract_dimensions(prompt_lower)
 
-        # 3. Room detection — Phase 1: taxonomy-driven
-        found = self._detect_rooms(prompt_lower)
+        # 3. Room detection
+        if LLM_PROVIDER_MODE != "regex":
+            llm_result = self._extract_rooms_via_llm(prompt)
+            if llm_result.get("rooms"):
+                found: Dict[str, int] = {}
+                for room_entry in llm_result["rooms"]:
+                    canonical = resolve_room_type(room_entry.get("type", ""))
+                    count = max(1, int(room_entry.get("count", 1)))
+                    found[canonical] = max(found.get(canonical, 0), count)
+                style = llm_result.get("style", style) or style
+                if llm_result.get("dimensions"):
+                    for k, v in llm_result["dimensions"].items():
+                        if v:
+                            dimensions[k] = v
+            else:
+                # LLM failed — fall through to regex
+                found = self._detect_rooms(prompt_lower)
+                extra = self._detect_unknown_rooms(prompt_lower, found)
+                found.update(extra)
+        else:
+            # Phase 1: taxonomy-driven regex scan
+            found = self._detect_rooms(prompt_lower)
+            # Phase 2: unknown/custom rooms
+            extra = self._detect_unknown_rooms(prompt_lower, found)
+            found.update(extra)
 
-        # 4. Room detection — Phase 2: unknown/custom rooms
-        extra = self._detect_unknown_rooms(prompt_lower, found)
-        found.update(extra)
-
-        # 5. Fallback: no rooms detected → standard house
+        # 4. Fallback: no rooms detected → standard house
         if not found:
             found = {
                 "living_room": 1,
@@ -250,10 +357,10 @@ class NLPService:
                 "corridor": 1,
             }
 
-        # 6. Build node list
+        # 5. Build node list
         rooms = self._build_room_list(found)
 
-        # 7. Spatial adjacency graph
+        # 6. Spatial adjacency graph
         relationships = self._build_relationships(rooms)
 
         return {

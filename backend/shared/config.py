@@ -47,4 +47,19 @@ class Settings:
     AWS_BUCKET_NAME: str = os.getenv("AWS_BUCKET_NAME", "")
     AWS_REGION: str = os.getenv("AWS_REGION", "us-east-1")
 
+    # Supabase Storage
+    SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
+    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "")
+    SUPABASE_JWT_KEY: str = os.getenv("SUPABASE_JWT_KEY", "")
+    SUPABASE_BUCKET: str = os.getenv("SUPABASE_BUCKET", "DeepInsights")
+    USE_SUPABASE: bool = bool(os.getenv("SUPABASE_URL", ""))
+
+    # LLM Provider
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "Claude")
+    LLM_PROVIDER_MODE: str = os.getenv("LLM_PROVIDER_MODE", "regex")
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
+    # CLAUDE_API_KEY is stored as ANTHROPIC_API_KEY in the Anthropic SDK convention
+    ANTHROPIC_API_KEY: str = os.getenv("CLAUDE_API_KEY", os.getenv("ANTHROPIC_API_KEY", ""))
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+
 settings = Settings()
