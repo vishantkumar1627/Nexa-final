@@ -20,12 +20,12 @@ import shutil
 # - 8 Automatic professional camera view renders (Hero, Top, Iso, Interiors, etc.)
 # =============================================================================
 
-WALL_HEIGHT_M = 2.8
+WALL_HEIGHT_M = 1.1
 WALL_THICKNESS_M = 0.2
-DOOR_HEIGHT_M = 2.1
+DOOR_HEIGHT_M = 1.0
 DOOR_WIDTH_M = 0.9
-WINDOW_SILL_HEIGHT_M = 0.9
-WINDOW_HEIGHT_M = 1.2
+WINDOW_SILL_HEIGHT_M = 0.3
+WINDOW_HEIGHT_M = 0.6
 FLOOR_SLAB_THICKNESS_M = 0.2
 
 # Inject backend path so Blender can import our taxonomy
@@ -256,6 +256,189 @@ def to_blender_coords(px, py, width, height, scale):
 # =============================================================================
 # PROCEDURAL FURNITURE ASSET LIBRARY
 # =============================================================================
+def load_glb_furniture_asset(asset_name, location, size, rot_z, parent):
+    """
+    Attempts to load a GLB asset from backend/assets/{asset_name}.glb.
+    If the asset file does not exist, returns None (falls back to procedural).
+    If it exists, imports it, centers its pivot, scales it to match target size, rotates, and parents it.
+    """
+    import os
+    import bpy
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(script_dir)
+    assets_dir = os.path.join(backend_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    
+    asset_path = os.path.join(assets_dir, f"{asset_name}.glb")
+    if not os.path.exists(asset_path):
+        print(f"[-] Asset library file not found: {asset_path}")
+        return None
+        
+    print(f"[+] Loading GLB asset: {asset_path}")
+    
+    # Store existing objects to find newly imported ones
+    old_objs = set(bpy.context.scene.objects)
+    
+    try:
+        # Load the GLB asset
+        bpy.ops.import_scene.gltf(filepath=asset_path)
+    except Exception as e:
+        print(f"[-] Failed to import GLB asset {asset_name}: {e}")
+        return None
+        
+    new_objs = list(set(bpy.context.scene.objects) - old_objs)
+    if not new_objs:
+        return None
+        
+    # Move imported objects to main scene collection to ensure they render
+    scene_collection = bpy.context.scene.collection
+    for o in new_objs:
+        if o not in list(scene_collection.objects):
+            scene_collection.objects.link(o)
+        for coll in list(o.users_collection):
+            if coll != scene_collection:
+                coll.objects.unlink(o)
+        
+    # Group under an empty parent at location
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=location)
+    asset_parent = bpy.context.active_object
+    asset_parent.name = f"Asset_{asset_name}_Instance"
+    asset_parent.parent = parent
+    asset_parent.rotation_euler[2] = rot_z
+    
+    # Reparent root-level imported objects to the empty parent
+    roots = [o for o in new_objs if o.parent not in new_objs]
+    for o in roots:
+        o.parent = asset_parent
+        o.matrix_parent_inverse.identity()
+        
+    # Calculate bounding box of the imported meshes to scale them to the target size
+    meshes = [o for o in new_objs if o.type == 'MESH']
+    if meshes and size:
+        # Calculate local bounding box dimensions
+        min_x = min(min((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_x = max(max((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
+        min_y = min(min((o.matrix_world @ v.co).y for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_y = max(max((o.matrix_world @ v.co).y for v in o.data.vertices) for o in meshes if o.data.vertices)
+        min_z = min(min((o.matrix_world @ v.co).z for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_z = max(max((o.matrix_world @ v.co).z for v in o.data.vertices) for o in meshes if o.data.vertices)
+        
+        dim_x = abs(max_x - min_x)
+        dim_y = abs(max_y - min_y)
+        dim_z = abs(max_z - min_z)
+        
+        # Center the imported objects around the empty's local origin (pivot at bottom)
+        cx_b = (min_x + max_x) / 2
+        cy_b = (min_y + max_y) / 2
+        cz_b = min_z
+        
+        for o in roots:
+            o.location.x -= cx_b
+            o.location.y -= cy_b
+            o.location.z -= cz_b
+            
+        # Apply scaling on parent to match target size
+        tx, ty, tz = size
+        sx = tx / dim_x if dim_x > 0.01 else 1.0
+        sy = ty / dim_y if dim_y > 0.01 else 1.0
+        sz = tz / dim_z if dim_z > 0.01 else 1.0
+        
+        asset_parent.scale = (sx, sy, sz)
+    
+    return asset_parent
+
+def seed_asset_library_if_needed(materials):
+    """
+    Checks if asset library folder and files exist. If any are missing,
+    automatically generates them procedurally in a temporary empty scene,
+    exports them as GLB to backend/assets/, and restores the original scene state.
+    """
+    import os
+    import bpy
+    
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(script_dir)
+    assets_dir = os.path.join(backend_dir, "assets")
+    os.makedirs(assets_dir, exist_ok=True)
+    
+    assets_to_seed = [
+        "bed", "sofa", "wardrobe", "dining_table", "chair", "toilet", "sink", "kitchen"
+    ]
+    
+    missing_assets = [a for a in assets_to_seed if not os.path.exists(os.path.join(assets_dir, f"{a}.glb"))]
+    if not missing_assets:
+        return
+        
+    print(f"[*] Seeding missing asset library GLB files: {missing_assets}")
+    
+    orig_scene = bpy.context.scene
+    temp_scene = bpy.data.scenes.new("TempAssetScene")
+    bpy.context.window.scene = temp_scene
+    
+    try:
+        for asset in missing_assets:
+            # Clean temp scene
+            for obj in list(temp_scene.objects):
+                bpy.data.objects.remove(obj, do_unlink=True)
+                
+            # Create the asset procedurally in the temp scene
+            if asset == "sofa":
+                create_cube("Base", (0, 0, 0.1), (2.0, 0.85, 0.15), materials['fabric_sofa'])
+                create_cube("Backrest", (0, -0.85/2 + 0.08, 0.45), (2.0, 0.16, 0.65), materials['fabric_sofa'])
+                create_cube("Arm_L", (-2.0/2 + 0.08, 0, 0.3), (0.16, 0.85, 0.4), materials['fabric_sofa'])
+                create_cube("Arm_R", (2.0/2 - 0.08, 0, 0.3), (0.16, 0.85, 0.4), materials['fabric_sofa'])
+                for i in range(3):
+                    offset_x = -2.0/2 + 0.16 + (i + 0.5) * (1.68 / 3)
+                    create_cube(f"Cushion_{i}", (offset_x, 0.05, 0.22), (0.53, 0.69, 0.12), materials['fabric_cushion'])
+            elif asset == "bed":
+                create_cube("Frame", (0, 0, 0.1), (1.6, 2.0, 0.2), materials['wood_door'])
+                create_cube("Headboard", (0, 1.0 - 0.05, 0.5), (1.6, 0.1, 0.8), materials['wood_door'])
+                create_cube("Mattress", (0, -0.05, 0.32), (1.52, 1.82, 0.28), materials['fabric_bed'])
+                create_cube("Pillow_L", (-0.4, 0.74, 0.49), (0.6, 0.36, 0.08), materials['fabric_pillow'])
+                create_cube("Pillow_R", (0.4, 0.74, 0.49), (0.6, 0.36, 0.08), materials['fabric_pillow'])
+                create_cube("BlanketFold", (0, -0.5, 0.47), (1.54, 0.9, 0.02), materials['fabric_blanket'])
+            elif asset == "wardrobe":
+                create_cube("Cabinet", (0, 0, 1.1), (1.6, 0.6, 2.2), materials['wood_door'])
+                create_cube("DoorPanel_L", (-0.39, 0.31, 1.1), (0.76, 0.01, 2.15), materials['wood_door'])
+                create_cube("DoorPanel_R", (0.39, 0.31, 1.1), (0.76, 0.01, 2.15), materials['wood_door'])
+                create_cylinder("Handle_L", (-0.05, 0.335, 1.1), 0.012, 0.28, material=materials['metal'])
+                create_cylinder("Handle_R", (0.05, 0.335, 1.1), 0.012, 0.28, material=materials['metal'])
+            elif asset == "dining_table":
+                create_cube("TableTop_Asset", (0, 0, 0.73), (1.4, 0.9, 0.04), materials['wood_door'])
+                for lx in [-0.62, 0.62]:
+                    for ly in [-0.37, 0.37]:
+                        create_cylinder("Leg_Asset", (lx, ly, 0.355), 0.03, 0.71, material=materials['metal'])
+            elif asset == "chair":
+                create_cube("ChairSeat_Asset", (0, 0, 0.45), (0.4, 0.4, 0.03), materials['fabric_cushion'])
+                create_cube("ChairBack_Asset", (0, -0.18, 0.67), (0.4, 0.04, 0.44), materials['wood_door'])
+                for clx in [-0.17, 0.17]:
+                    for cly in [-0.17, 0.17]:
+                        create_cylinder("ChairLeg_Asset", (clx, cly, 0.225), 0.015, 0.45, material=materials['metal'])
+            elif asset == "toilet":
+                create_cube("WaterTank", (0, 0.22, 0.52), (0.45, 0.22, 0.5), materials['toilet_material'])
+                create_cube("ToiletBowl", (0, -0.12, 0.2), (0.36, 0.44, 0.4), materials['toilet_material'])
+                create_cube("SeatLid", (0, -0.12, 0.41), (0.34, 0.42, 0.02), materials['wood_door'])
+                create_cylinder("FlushBtn", (0.16, 0.22, 0.78), 0.025, 0.03, rotation=(math.pi/2, 0, 0), material=materials['metal'])
+            elif asset == "sink":
+                create_cube("Basin_Asset", (0, 0, 0.015), (0.52, 0.32, 0.03), materials['toilet_material'])
+                create_cylinder("Faucet_Asset", (0, -0.11, 0.1), 0.015, 0.16, material=materials['metal'])
+            elif asset == "kitchen":
+                create_cube("CabinetBase", (0, 0, 0.44), (1.8, 0.65, 0.88), materials['wood_door'])
+                create_cube("KitchenCounter", (0, 0, 0.9), (1.81, 0.66, 0.04), materials['kitchen_surface'])
+                create_cube("KitchenSink", (0, 0, 0.925), (0.75, 0.42, 0.01), materials['metal'])
+                create_cylinder("GooseFaucet", (0, 0.14, 1.08), 0.016, 0.32, material=materials['metal'])
+                
+            # Select and export
+            bpy.ops.object.select_all(action='SELECT')
+            export_path = os.path.join(assets_dir, f"{asset}.glb")
+            print(f"[+] Exporting seeded asset {asset} to: {export_path}")
+            bpy.ops.export_scene.gltf(filepath=export_path, export_format='GLB', use_selection=True)
+            
+    finally:
+        bpy.context.window.scene = orig_scene
+        bpy.data.scenes.remove(temp_scene)
+
 def build_sofa(name, loc, size, rot_z, materials, parent):
     w, d, h = size
     cx, cy, cz = loc
@@ -266,26 +449,28 @@ def build_sofa(name, loc, size, rot_z, materials, parent):
     sofa_grp.parent = parent
     sofa_grp.rotation_euler[2] = rot_z
     
-    # Sofa Base frame
-    create_cube("Base", (0, 0, 0.1), (w, d, 0.15), materials['fabric_sofa'], sofa_grp)
-    # Backrest
-    create_cube("Backrest", (0, -d/2 + 0.08, 0.45), (w, 0.16, 0.65), materials['fabric_sofa'], sofa_grp)
-    # Armrests
-    create_cube("Arm_L", (-w/2 + 0.08, 0, 0.3), (0.16, d, 0.4), materials['fabric_sofa'], sofa_grp)
-    create_cube("Arm_R", (w/2 - 0.08, 0, 0.3), (0.16, d, 0.4), materials['fabric_sofa'], sofa_grp)
-    
-    # Dynamic seat cushions
-    n_cush = 3 if w > 1.8 else 2
-    cw = (w - 0.32) / n_cush
-    for i in range(n_cush):
-        offset_x = -w/2 + 0.16 + (i + 0.5) * cw
-        create_cube(f"Cushion_{i}", (offset_x, 0.05, 0.22), (cw * 0.95, d - 0.16, 0.12), materials['fabric_cushion'], sofa_grp)
+    sofa_asset = load_glb_furniture_asset("sofa", (0, 0, 0), (w, d, h), 0.0, sofa_grp)
+    if not sofa_asset:
+        # Sofa Base frame
+        create_cube("Base", (0, 0, 0.1), (w, d, 0.15), materials['fabric_sofa'], sofa_grp)
+        # Backrest
+        create_cube("Backrest", (0, -d/2 + 0.08, 0.45), (w, 0.16, 0.65), materials['fabric_sofa'], sofa_grp)
+        # Armrests
+        create_cube("Arm_L", (-w/2 + 0.08, 0, 0.3), (0.16, d, 0.4), materials['fabric_sofa'], sofa_grp)
+        create_cube("Arm_R", (w/2 - 0.08, 0, 0.3), (0.16, d, 0.4), materials['fabric_sofa'], sofa_grp)
         
-    # Wooden feet cylinders
-    for fx in [-w/2 + 0.08, w/2 - 0.08]:
-        for fy in [-d/2 + 0.08, d/2 - 0.08]:
-            create_cylinder("Foot", (fx, fy, 0.035), 0.025, 0.07, rotation=(0, 0, 0), material=materials['wood_door'], parent=sofa_grp)
+        # Dynamic seat cushions
+        n_cush = 3 if w > 1.8 else 2
+        cw = (w - 0.32) / n_cush
+        for i in range(n_cush):
+            offset_x = -w/2 + 0.16 + (i + 0.5) * cw
+            create_cube(f"Cushion_{i}", (offset_x, 0.05, 0.22), (cw * 0.95, d - 0.16, 0.12), materials['fabric_cushion'], sofa_grp)
             
+        # Wooden feet cylinders
+        for fx in [-w/2 + 0.08, w/2 - 0.08]:
+            for fy in [-d/2 + 0.08, d/2 - 0.08]:
+                create_cylinder("Foot", (fx, fy, 0.035), 0.025, 0.07, rotation=(0, 0, 0), material=materials['wood_door'], parent=sofa_grp)
+                
     return sofa_grp
 
 def build_bed(name, loc, size, rot_z, materials, parent):
@@ -298,35 +483,19 @@ def build_bed(name, loc, size, rot_z, materials, parent):
     bed_grp.parent = parent
     bed_grp.rotation_euler[2] = rot_z
     
-    # Main bed frame
-    create_cube("Frame", (0, 0, 0.12), (w, d, 0.24), materials['wood_door'], bed_grp)
-    # Headboard
-    create_cube("Headboard", (0, d/2 - 0.05, 0.55), (w, 0.1, 0.9), materials['wood_door'], bed_grp)
-    # Soft Mattress
-    create_cube("Mattress", (0, -0.05, 0.36), (w - 0.06, d - 0.15, 0.28), materials['fabric_bed'], bed_grp)
-    # Pillows
-    pw = (w - 0.2) / 2
-    create_cube("Pillow_L", (-pw/2 - 0.02, d/2 - 0.25, 0.52), (pw, 0.38, 0.1), materials['fabric_pillow'], bed_grp)
-    create_cube("Pillow_R", (pw/2 + 0.02, d/2 - 0.25, 0.52), (pw, 0.38, 0.1), materials['fabric_pillow'], bed_grp)
-    # Blanket duvet
-    create_cube("Duvet", (0, -0.3, 0.5), (w - 0.05, d - 0.7, 0.04), materials['fabric_blanket'], bed_grp)
-    
-    # Floating bedside tables flanking the bed
-    side_w = 0.45
-    for sx in [-w/2 - side_w/2 - 0.05, w/2 + side_w/2 + 0.05]:
-        sy = d/2 - side_w/2
-        table = create_cube("SideTable", (sx, sy, side_w/2), (side_w, side_w, side_w), materials['wood_door'], bed_grp)
-        # Small lamp base and shade
-        create_cylinder("LampBase", (sx, sy, side_w + 0.05), 0.05, 0.08, material=materials['metal'], parent=bed_grp)
-        create_cylinder("LampShade", (sx, sy, side_w + 0.16), 0.09, 0.14, material=materials['fabric_pillow'], parent=bed_grp)
-        
-        # Soft night lamp light
-        bpy.ops.object.light_add(type='POINT', location=(sx, sy, side_w + 0.22))
-        lt = bpy.context.active_object
-        lt.name = f"BedLampLight_{sx:.2f}"
-        lt.data.energy = 5.0
-        lt.data.color = (1.0, 0.8, 0.55) # Soft warm light
-        lt.parent = bed_grp
+    bed_asset = load_glb_furniture_asset("bed", (0, 0, 0), (w, d, h), 0.0, bed_grp)
+    if not bed_asset:
+        # Hardwood bed frame
+        create_cube("Frame", (0, 0, 0.1), (w, d, 0.2), materials['wood_door'], bed_grp)
+        # Tall supportive headboard
+        create_cube("Headboard", (0, d/2 - 0.05, 0.5), (w, 0.1, 0.8), materials['wood_door'], bed_grp)
+        # Comfy plush mattress
+        create_cube("Mattress", (0, -0.05, 0.32), (w - 0.08, d - 0.18, 0.28), materials['fabric_bed'], bed_grp)
+        # Standard double pillow assembly
+        create_cube("Pillow_L", (-w/4, d/2 - 0.26, 0.49), (w*0.38, 0.36, 0.08), materials['fabric_pillow'], bed_grp)
+        create_cube("Pillow_R", (w/4, d/2 - 0.26, 0.49), (w*0.38, 0.36, 0.08), materials['fabric_pillow'], bed_grp)
+        # Folded blanket aesthetic overlay
+        create_cube("BlanketFold", (0, -d/4, 0.47), (w - 0.06, d/2 - 0.1, 0.02), materials['fabric_blanket'], bed_grp)
         
     return bed_grp
 
@@ -340,33 +509,36 @@ def build_dining_table(name, loc, size, rot_z, materials, parent):
     table_grp.parent = parent
     table_grp.rotation_euler[2] = rot_z
     
-    # Wooden Table top with smooth beveled borders
-    create_cube("TableTop", (0, 0, h - 0.02), (w, d, 0.04), materials['wood_door'], table_grp)
-    
-    # Beveled sturdy metal legs
-    for lx in [-w/2 + 0.08, w/2 - 0.08]:
-        for ly in [-d/2 + 0.08, d/2 - 0.08]:
-            create_cylinder("Leg", (lx, ly, (h - 0.04)/2), 0.03, h - 0.04, material=materials['metal'], parent=table_grp)
-            
+    table_asset = load_glb_furniture_asset("dining_table", (0, 0, 0), (w, d, h), 0.0, table_grp)
+    if not table_asset:
+        # Wooden Table top with smooth beveled borders
+        create_cube("TableTop", (0, 0, h - 0.02), (w, d, 0.04), materials['wood_door'], table_grp)
+        # Beveled sturdy metal legs
+        for lx in [-w/2 + 0.08, w/2 - 0.08]:
+            for ly in [-d/2 + 0.08, d/2 - 0.08]:
+                create_cylinder("Leg", (lx, ly, (h - 0.04)/2), 0.03, h - 0.04, material=materials['metal'], parent=table_grp)
+                
     # Flanking dining chairs
     ch_w, ch_d, ch_h = 0.4, 0.4, 0.45
-    # Front and back chairs
     y_offsets = [-d/2 - 0.15, d/2 + 0.15]
     for idx, cy_off in enumerate(y_offsets):
-        # 2 chairs on each side if table is long
         x_offsets = [-w/4, w/4] if w > 1.4 else [0.0]
         for c_idx, cx_off in enumerate(x_offsets):
             chair_name = f"Chair_{idx}_{c_idx}"
-            # Chair seat
-            create_cube(f"{chair_name}_Seat", (cx_off, cy_off, ch_h), (ch_w, ch_d, 0.03), materials['fabric_cushion'], table_grp)
-            # Chair backrest
             br_rot = math.pi if cy_off > 0 else 0.0
-            create_cube(f"{chair_name}_Back", (cx_off, cy_off + (0.18 if cy_off > 0 else -0.18), ch_h + 0.22), (ch_w, 0.04, 0.44), materials['wood_door'], table_grp)
-            # 4 slim chair legs
-            for clx in [-ch_w/2 + 0.03, ch_w/2 - 0.03]:
-                for cly in [-ch_d/2 + 0.03, ch_d/2 - 0.03]:
-                    create_cylinder(f"{chair_name}_Leg", (cx_off + clx, cy_off + cly, ch_h/2), 0.015, ch_h, material=materials['metal'], parent=table_grp)
-                    
+            
+            # Try to load chair asset
+            chair_asset = load_glb_furniture_asset("chair", (cx_off, cy_off, 0.0), (ch_w, ch_d, ch_h + 0.45), br_rot, table_grp)
+            if not chair_asset:
+                # Chair seat
+                create_cube(f"{chair_name}_Seat", (cx_off, cy_off, ch_h), (ch_w, ch_d, 0.03), materials['fabric_cushion'], table_grp)
+                # Chair backrest
+                create_cube(f"{chair_name}_Back", (cx_off, cy_off + (0.18 if cy_off > 0 else -0.18), ch_h + 0.22), (ch_w, 0.04, 0.44), materials['wood_door'], table_grp)
+                # 4 slim chair legs
+                for clx in [-ch_w/2 + 0.03, ch_w/2 - 0.03]:
+                    for cly in [-ch_d/2 + 0.03, ch_d/2 - 0.03]:
+                        create_cylinder(f"{chair_name}_Leg", (cx_off + clx, cy_off + cly, ch_h/2), 0.015, ch_h, material=materials['metal'], parent=table_grp)
+                        
     return table_grp
 
 def build_tv_unit(name, loc, size, rot_z, materials, parent):
@@ -399,15 +571,48 @@ def build_wardrobe(name, loc, size, rot_z, materials, parent):
     wd_grp.parent = parent
     wd_grp.rotation_euler[2] = rot_z
     
-    # Wardrobe cabinet box
-    create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], wd_grp)
-    # Double door detail lines
-    create_cube("DoorPanel_L", (-w/4 + 0.01, d/2 + 0.01, h/2), (w/2 - 0.02, 0.01, h - 0.05), materials['wood_door'], wd_grp)
-    create_cube("DoorPanel_R", (w/4 - 0.01, d/2 + 0.01, h/2), (w/2 - 0.02, 0.01, h - 0.05), materials['wood_door'], wd_grp)
-    # Chrome pull handles
-    create_cylinder("Handle_L", (-0.05, d/2 + 0.035, h/2), 0.012, 0.28, rotation=(0, 0, 0), material=materials['metal'], parent=wd_grp)
-    create_cylinder("Handle_R", (0.05, d/2 + 0.035, h/2), 0.012, 0.28, rotation=(0, 0, 0), material=materials['metal'], parent=wd_grp)
+    wardrobe_asset = load_glb_furniture_asset("wardrobe", (0, 0, 0), (w, d, h), 0.0, wd_grp)
+    if not wardrobe_asset:
+        # Wardrobe cabinet box
+        create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], wd_grp)
+        # Double door detail lines
+        create_cube("DoorPanel_L", (-w/4 + 0.01, d/2 + 0.01, h/2), (w/2 - 0.02, 0.01, h - 0.05), materials['wood_door'], wd_grp)
+        create_cube("DoorPanel_R", (w/4 - 0.01, d/2 + 0.01, h/2), (w/2 - 0.02, 0.01, h - 0.05), materials['wood_door'], wd_grp)
+        # Chrome pull handles
+        create_cylinder("Handle_L", (-0.05, d/2 + 0.035, h/2), 0.012, 0.28, rotation=(0, 0, 0), material=materials['metal'], parent=wd_grp)
+        create_cylinder("Handle_R", (0.05, d/2 + 0.035, h/2), 0.012, 0.28, rotation=(0, 0, 0), material=materials['metal'], parent=wd_grp)
     return wd_grp
+
+def build_side_table(name, loc, size, rot_z, materials, parent):
+    w, d, h = size
+    cx, cy, cz = loc
+    
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(cx, cy, cz))
+    st_grp = bpy.context.active_object
+    st_grp.name = name
+    st_grp.parent = parent
+    st_grp.rotation_euler[2] = rot_z
+    
+    create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], st_grp)
+    create_cube("TopSlab", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['wood_door'], st_grp)
+    create_cylinder("DrawerHandle", (0, d/2 + 0.015, h * 0.65), 0.01, 0.06, rotation=(0, 0, 0), material=materials['metal'], parent=st_grp)
+    return st_grp
+
+def build_coffee_table(name, loc, size, rot_z, materials, parent):
+    w, d, h = size
+    cx, cy, cz = loc
+    
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=(cx, cy, cz))
+    ct_grp = bpy.context.active_object
+    ct_grp.name = name
+    ct_grp.parent = parent
+    ct_grp.rotation_euler[2] = rot_z
+    
+    create_cube("GlassTop", (0, 0, h - 0.01), (w, d, 0.02), materials['glass'], ct_grp)
+    for lx in [-w/2 + 0.05, w/2 - 0.05]:
+        for ly in [-d/2 + 0.05, d/2 - 0.05]:
+            create_cylinder("MetalLeg", (lx, ly, (h - 0.02)/2), 0.02, h - 0.02, material=materials['metal'], parent=ct_grp)
+    return ct_grp
 
 def build_toilet(name, loc, rot_z, materials, parent):
     cx, cy, cz = loc
@@ -418,14 +623,16 @@ def build_toilet(name, loc, rot_z, materials, parent):
     t_grp.parent = parent
     t_grp.rotation_euler[2] = rot_z
     
-    # Porcelain flush water tank
-    create_cube("WaterTank", (0, 0.22, 0.52), (0.45, 0.22, 0.5), materials['toilet_material'], t_grp)
-    # Porcelain toilet bowl
-    create_cube("ToiletBowl", (0, -0.12, 0.2), (0.36, 0.44, 0.4), materials['toilet_material'], t_grp)
-    # Seat rim lid
-    create_cube("SeatLid", (0, -0.12, 0.41), (0.34, 0.42, 0.02), materials['wood_door'], t_grp)
-    # Chrome flush handle button
-    create_cylinder("FlushBtn", (0.16, 0.22, 0.78), 0.025, 0.03, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=t_grp)
+    toilet_asset = load_glb_furniture_asset("toilet", (0, 0, 0), (0.45, 0.66, 0.8), 0.0, t_grp)
+    if not toilet_asset:
+        # Porcelain flush water tank
+        create_cube("WaterTank", (0, 0.22, 0.52), (0.45, 0.22, 0.5), materials['toilet_material'], t_grp)
+        # Porcelain toilet bowl
+        create_cube("ToiletBowl", (0, -0.12, 0.2), (0.36, 0.44, 0.4), materials['toilet_material'], t_grp)
+        # Seat rim lid
+        create_cube("SeatLid", (0, -0.12, 0.41), (0.34, 0.42, 0.02), materials['wood_door'], t_grp)
+        # Chrome flush handle button
+        create_cylinder("FlushBtn", (0.16, 0.22, 0.78), 0.025, 0.03, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=t_grp)
     return t_grp
 
 def build_vanity(name, loc, size, rot_z, materials, parent):
@@ -442,10 +649,14 @@ def build_vanity(name, loc, size, rot_z, materials, parent):
     create_cube("VanityDrawer", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], v_grp)
     # Polished Marble Countertop
     create_cube("VanityTop", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['kitchen_surface'], v_grp)
-    # Porcelain Wash Basin Sink
-    create_cube("Basin", (0, 0, h + 0.015), (w * 0.65, d * 0.65, 0.03), materials['toilet_material'], v_grp)
-    # Chrome goose faucet
-    create_cylinder("Faucet", (0, -d*0.22, h + 0.1), 0.015, 0.16, rotation=(0, 0, 0), material=materials['metal'], parent=v_grp)
+    
+    # Try to load sink asset
+    sink_asset = load_glb_furniture_asset("sink", (0, 0, h + 0.015), (w * 0.65, d * 0.65, 0.16), 0.0, v_grp)
+    if not sink_asset:
+        # Porcelain Wash Basin Sink
+        create_cube("Basin", (0, 0, h + 0.015), (w * 0.65, d * 0.65, 0.03), materials['toilet_material'], v_grp)
+        # Chrome goose faucet
+        create_cylinder("Faucet", (0, -d*0.22, h + 0.1), 0.015, 0.16, rotation=(0, 0, 0), material=materials['metal'], parent=v_grp)
     return v_grp
 
 def build_shower(name, loc, size, rot_z, materials, parent):
@@ -479,14 +690,20 @@ def build_kitchen_cabinet(name, loc, size, rot_z, materials, parent):
     k_grp.parent = parent
     k_grp.rotation_euler[2] = rot_z
     
-    # Kitchen counter cabinet base structure
-    create_cube("CabinetBase", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], k_grp)
-    # Polished Marble countertop slab
-    create_cube("KitchenCounter", (0, 0, h - 0.02), (w + 0.01, d + 0.01, 0.04), materials['kitchen_surface'], k_grp)
-    # Inset metal dual-sink sink
-    create_cube("KitchenSink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.01), materials['metal'], k_grp)
-    # Chrome faucet neck
-    create_cylinder("GooseFaucet", (0, d*0.22, h + 0.16), 0.016, 0.32, rotation=(0, 0, 0), material=materials['metal'], parent=k_grp)
+    kitchen_asset = load_glb_furniture_asset("kitchen", (0, 0, 0), (w, d, h), 0.0, k_grp)
+    if not kitchen_asset:
+        # Kitchen counter cabinet base structure
+        create_cube("CabinetBase", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], k_grp)
+        # Polished Marble countertop slab
+        create_cube("KitchenCounter", (0, 0, h - 0.02), (w + 0.01, d + 0.01, 0.04), materials['kitchen_surface'], k_grp)
+        
+        # Try to load sink asset
+        sink_asset = load_glb_furniture_asset("sink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.16), 0.0, k_grp)
+        if not sink_asset:
+            # Inset metal dual-sink sink
+            create_cube("KitchenSink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.01), materials['metal'], k_grp)
+            # Chrome faucet neck
+            create_cylinder("GooseFaucet", (0, d*0.22, h + 0.16), 0.016, 0.32, rotation=(0, 0, 0), material=materials['metal'], parent=k_grp)
     return k_grp
 
 def build_refrigerator(name, loc, size, rot_z, materials, parent):
@@ -578,6 +795,7 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
         'wall': create_pbr_material("Drywall_White", (0.96, 0.96, 0.94, 1.0), roughness=0.75),
         'floor_wood': create_wood_material("Hardwood_Walnut"),
         'tile': create_tile_material("Tile_Bathroom", (0.8, 0.85, 0.88, 1.0)),
+        'floor_kitchen': create_tile_material("Tile_Kitchen", (0.76, 0.72, 0.68, 1.0)),
         'glass': create_glass_material("Glass_Refractive"),
         'wood_door': create_pbr_material("Wood_Oak", (0.42, 0.28, 0.15, 1.0), roughness=0.48),
         'kitchen_surface': create_pbr_material("Marble_Calacatta", (0.95, 0.95, 0.95, 1.0), roughness=0.08),
@@ -592,6 +810,8 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
         'roof': create_pbr_material("Roof_Slab_Mat", (0.28, 0.3, 0.32, 1.0), roughness=0.72),
         'lawn': create_lawn_material("Lawn_Grass")
     }
+    
+    seed_asset_library_if_needed(materials)
     
     min_house_x, max_house_x = 9999.0, -9999.0
     min_house_y, max_house_y = 9999.0, -9999.0
@@ -633,8 +853,10 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
             # A. Extrude thick floor slab meshes
             slab_obj = create_cube(f"FloorSlab_F{floor_idx}_{room['id']}", (cx, cy, z_offset - FLOOR_SLAB_THICKNESS_M/2), (size_x, size_y, FLOOR_SLAB_THICKNESS_M), parent=floor_parent)
             canonical = resolve_room_type(room["id"])
-            if canonical in ("bathroom", "toilet", "powder_room", "kitchen"):
+            if canonical in ("bathroom", "toilet", "powder_room"):
                 slab_obj.data.materials.append(materials['tile'])
+            elif canonical == "kitchen":
+                slab_obj.data.materials.append(materials['floor_kitchen'])
             else:
                 slab_obj.data.materials.append(materials['floor_wood'])
             uv_unwrap_object(slab_obj)
@@ -799,22 +1021,31 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
             
             # Position dynamic assets in context of door locations
             if canonical == "bedroom":
-                build_bed(f"BedSet_F{floor_idx}_{room['id']}", (cx, y2 - 1.25, z_offset), (1.6, 2.0, 0.6), 0.0, materials, floor_parent)
+                build_bed(f"BedSet_F{floor_idx}_{room['id']}", (cx, y1 - 1.25, z_offset), (1.6, 2.0, 0.6), 0.0, materials, floor_parent)
+                # Place side tables flanking the bed if there is enough room width
+                if room_w >= 3.4:
+                    build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (cx - 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
+                    build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (cx + 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
+                elif room_w >= 2.6:
+                    build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (cx + 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
                 if avail_l > 2.8:
                     build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (x1 + 0.6, cy, z_offset), (1.6, 0.6, 2.2), math.pi/2, materials, floor_parent)
             elif canonical in ("living_room", "lounge"):
-                build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (cx, y1 + 0.85, z_offset), (2.0, 0.85, 0.7), 0.0, materials, floor_parent)
-                build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (cx, y2 - 0.5, z_offset), (1.8, 0.45, 0.5), 0.0, materials, floor_parent)
+                build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (cx, y2 + 0.85, z_offset), (2.0, 0.85, 0.7), 0.0, materials, floor_parent)
+                build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (cx, y1 - 0.5, z_offset), (1.8, 0.45, 0.5), 0.0, materials, floor_parent)
+                # Place coffee table in front of the sofa if there is enough room length
+                if room_l >= 3.2:
+                    build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (cx, y2 + 1.7, z_offset), (1.0, 0.55, 0.42), 0.0, materials, floor_parent)
             elif canonical == "dining_room":
                 build_dining_table(f"Dining_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.4, 0.9, 0.75), 0.0, materials, floor_parent)
             elif canonical in ("bathroom", "toilet", "powder_room"):
-                build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (x1 + 0.4, y2 - 0.4, z_offset), math.pi, materials, floor_parent)
+                build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (x1 + 0.4, y1 - 0.4, z_offset), math.pi, materials, floor_parent)
                 build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (x2 - 0.5, cy, z_offset), (0.8, 0.5, 0.85), -math.pi/2, materials, floor_parent)
-                build_shower(f"Shower_F{floor_idx}_{room['id']}", (x1 + 0.5, y1 + 0.5, z_offset), (0.9, 0.9, 2.0), 0.0, materials, floor_parent)
+                build_shower(f"Shower_F{floor_idx}_{room['id']}", (x1 + 0.5, y2 + 0.5, z_offset), (0.9, 0.9, 2.0), 0.0, materials, floor_parent)
             elif canonical == "kitchen":
                 build_kitchen_cabinet(f"Kitchen_F{floor_idx}_{room['id']}", (x1 + 0.7, cy, z_offset), (0.65, room_l - 0.8, 0.92), math.pi/2, materials, floor_parent)
-                build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (x2 - 0.45, y2 - 0.45, z_offset), (0.8, 0.75, 1.8), -math.pi/2, materials, floor_parent)
-                build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (cx, y2 - 0.4, z_offset), (0.75, 0.65, 0.92), 0.0, materials, floor_parent)
+                build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (x2 - 0.45, y1 - 0.45, z_offset), (0.8, 0.75, 1.8), -math.pi/2, materials, floor_parent)
+                build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (cx, y1 - 0.4, z_offset), (0.75, 0.65, 0.92), 0.0, materials, floor_parent)
             elif canonical == "office":
                 build_office_desk(f"Desk_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.4, 0.7, 0.75), 0.0, materials, floor_parent)
                 
@@ -1054,9 +1285,18 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
             
             w_out = w_tree.nodes.new("ShaderNodeOutputWorld")
             w_bg = w_tree.nodes.new("ShaderNodeBackground")
-            # Soft ambient sky blue
-            w_bg.inputs["Color"].default_value = (0.90, 0.94, 0.98, 1.0)
-            w_bg.inputs["Strength"].default_value = 0.8
+            w_sky = w_tree.nodes.new("ShaderNodeTexSky")
+            if hasattr(w_sky, "sky_type"):
+                w_sky.sky_type = 'MULTIPLE_SCATTERING'
+                w_sky.sun_elevation = math.radians(28)
+                w_sky.sun_rotation = math.radians(45)
+                w_sky.altitude = 120
+                w_sky.air_density = 1.0
+                w_sky.dust_density = 0.8
+                w_sky.ozone_density = 1.2
+                
+            w_bg.inputs["Strength"].default_value = 0.55
+            w_tree.links.new(w_sky.outputs["Color"], w_bg.inputs["Color"])
             w_tree.links.new(w_bg.outputs["Background"], w_out.inputs["Surface"])
         except Exception as e:
             print(f"Warning: Failed to configure environment sky nodes: {e}")
@@ -1096,25 +1336,43 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
     # =============================================================================
     # 8. AUTOMATIC CAMERA PLACEMENT & PRESENTATION RENDERING
     # =============================================================================
+    # Remove all roof and ceiling objects to expose the furnished interior floorplan
+    objs_to_remove = []
+    for obj in bpy.context.scene.objects:
+        if "Ceiling_" in obj.name or obj.name == "RoofAssembly" or "PitchedRoof" in obj.name or "HipRoof" in obj.name or "ShedRoof" in obj.name:
+            objs_to_remove.append(obj.name)
+            
+    for name in objs_to_remove:
+        obj = bpy.data.objects.get(name)
+        if obj:
+            try:
+                for child in list(obj.children):
+                    bpy.data.objects.remove(child, do_unlink=True)
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception as e:
+                print(f"Failed to remove roof/ceiling object {name}: {e}")
+                
     # Calculate global bounding box sizing to center perspective frames
     house_cx = (min_house_x + max_house_x) / 2
     house_cy = (min_house_y + max_house_y) / 2
     size_house_x = abs(max_house_x - min_house_x)
     size_house_y = abs(max_house_y - min_house_y)
     max_dim = max(size_house_x, size_house_y, 4.0)
-    ortho_scale = max_dim * 1.05
+    ortho_scale = max_dim * 1.35  # Increased to prevent cropping
     
     scene.render.resolution_x = 640
     scene.render.resolution_y = 360
     scene.render.image_settings.file_format = 'PNG'
     
-    # 1. Top View Camera (hide roof Assembly during capture)
-    topdown_z = max_dim * 1.2
+    # 1. Top View Camera
+    topdown_z = max_dim * 2.0
     bpy.ops.object.camera_add(location=(house_cx, house_cy, topdown_z))
     topdown_cam = bpy.context.active_object
     topdown_cam.name = "TopdownCamera"
     topdown_cam.data.type = 'ORTHO'
-    topdown_cam.data.ortho_scale = ortho_scale * 0.95
+    topdown_cam.data.ortho_scale = ortho_scale
+    topdown_cam.data.clip_start = 0.1
+    topdown_cam.data.clip_end = topdown_z * 2.0
     topdown_cam.rotation_euler = (0.0, 0.0, 0.0)
     
     # 2. Isometric View Camera
@@ -1123,10 +1381,12 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
     iso_cam.name = "IsometricCamera"
     iso_cam.data.type = 'ORTHO'
     iso_cam.data.ortho_scale = ortho_scale
-    d_iso = max_dim * 0.85
+    iso_cam.data.clip_start = 0.1
+    iso_cam.data.clip_end = max_dim * 10.0
+    d_iso = max_dim * 2.0  # Placed further away to prevent near clipping
     cam_x = house_cx + d_iso * math.cos(math.radians(45))
     cam_y = house_cy - d_iso * math.cos(math.radians(45))
-    cam_z = d_iso * 0.75
+    cam_z = d_iso * 0.85
     iso_cam.location = (cam_x, cam_y, cam_z)
     try:
         import mathutils
@@ -1139,10 +1399,10 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
     bpy.ops.object.camera_add(location=(0, 0, 0))
     hero_cam = bpy.context.active_object
     hero_cam.name = "ExteriorHeroCamera"
-    hero_cam.data.lens = 35 # 35mm professional lens
-    hc_x = house_cx + max_dim * 0.95
-    hc_y = house_cy - max_dim * 0.95
-    hc_z = top_z + 1.0
+    hero_cam.data.lens = 35
+    hc_x = house_cx + max_dim * 1.5
+    hc_y = house_cy - max_dim * 1.5
+    hc_z = top_z + max_dim * 0.8
     hero_cam.location = (hc_x, hc_y, hc_z)
     try:
         direction = mathutils.Vector((house_cx - hc_x, house_cy - hc_y, top_z/2 - hc_z))
@@ -1150,28 +1410,22 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
     except Exception:
         hero_cam.rotation_euler = (math.radians(72), 0.0, math.radians(45))
 
-    # A. Render Exterior Hero View
-    roof_parent.hide_viewport = False
-    roof_parent.hide_render = False
-    scene.camera = hero_cam
-    hero_path = os.path.join(output_dir, "render_exterior.png")
-    scene.render.filepath = hero_path
-    print(f"Rendering exterior cycles visualization to: {hero_path}")
+    # A. Render Isometric View (primary floorplan preview render)
+    scene.camera = iso_cam
+    iso_path = os.path.join(output_dir, "render_isometric.png")
+    scene.render.filepath = iso_path
+    print(f"Rendering isometric interior floorplan Cycles visualization to: {iso_path}")
     bpy.ops.render.render(write_still=True)
-    # Duplicate standard render.png
-    shutil.copy(hero_path, os.path.join(output_dir, "render.png"))
+    # Duplicate standard render.png to be the isometric interior view
+    shutil.copy(iso_path, os.path.join(output_dir, "render.png"))
+    shutil.copy(iso_path, os.path.join(output_dir, "render_exterior.png"))
     
-    # C. Render Topdown projection (hide roof!)
-    roof_parent.hide_viewport = True
-    roof_parent.hide_render = True
+    # C. Render Topdown projection
     scene.camera = topdown_cam
     topdown_path = os.path.join(output_dir, "render_topdown.png")
     scene.render.filepath = topdown_path
+    print(f"Rendering topdown projection to: {topdown_path}")
     bpy.ops.render.render(write_still=True)
-    
-    # Re-enable roof visibility
-    roof_parent.hide_viewport = False
-    roof_parent.hide_render = False
     
     # D. Configure (but skip rendering) Interior Room Camera Views for user customization
     # We find coordinates of Living Room, Bedroom, and Kitchen and place cameras inside them
