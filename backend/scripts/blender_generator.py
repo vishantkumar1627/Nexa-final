@@ -253,6 +253,172 @@ def to_blender_coords(px, py, width, height, scale):
     by = (height/2 - py) / scale
     return bx, by
 
+def scan_furniture_assets():
+    import os
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    backend_dir = os.path.dirname(script_dir)
+    furniture_dir = os.path.join(backend_dir, "assets", "furniture")
+    registry = {}
+    if os.path.exists(furniture_dir):
+        for f in os.listdir(furniture_dir):
+            if f.lower().endswith(".fbx"):
+                name_without_ext = os.path.splitext(f)[0]
+                registry[name_without_ext.lower()] = os.path.join(furniture_dir, f)
+    return registry
+
+FURNITURE_REGISTRY = scan_furniture_assets()
+
+def load_fbx_furniture_asset(asset_name, location, size, rot_z, parent):
+    """
+    Attempts to load an FBX asset from backend/assets/furniture/{asset_name}.fbx.
+    If the asset file does not exist, returns None.
+    If it exists, imports it, centers its pivot, scales it to match target size, rotates, and parents it.
+    """
+    import os
+    import bpy
+    
+    # 1. Verify that FBX files are actually discovered
+    asset_path = FURNITURE_REGISTRY.get(asset_name.lower())
+    if not asset_path or not os.path.exists(asset_path):
+        print(f"[-] DEBUG: FBX asset '{asset_name}' not found in registry path.")
+        return None
+        
+    print(f"[+] DEBUG [Task 1]: FBX file discovered at {asset_path}")
+    print(f"[+] DEBUG [Task 2]: Discovered furniture registry size: {len(FURNITURE_REGISTRY)}")
+    
+    # Deselect all first
+    bpy.ops.object.select_all(action='DESELECT')
+    
+    # Store existing objects to find newly imported ones
+    old_objs = set(bpy.context.scene.objects)
+    
+    # 3. Verify Blender can import the FBX file
+    try:
+        # Load the FBX asset
+        bpy.ops.import_scene.fbx(filepath=asset_path)
+        print(f"[+] DEBUG [Task 3]: Blender successfully imported FBX asset '{asset_name}'")
+    except Exception as e:
+        print(f"[-] DEBUG [Task 3]: Failed to import FBX asset '{asset_name}': {e}")
+        return None
+        
+    # 4. Verify imported objects appear in the scene
+    new_objs = list(set(bpy.context.scene.objects) - old_objs)
+    if not new_objs:
+        print(f"[-] DEBUG [Task 4]: Imported FBX '{asset_name}' but no new objects appeared in the scene!")
+        return None
+    print(f"[+] DEBUG [Task 4]: Imported objects appeared: {[o.name for o in new_objs]}")
+        
+    # 5. Verify imported objects are linked to the active collection (main scene collection)
+    scene_collection = bpy.context.scene.collection
+    for o in new_objs:
+        if o not in list(scene_collection.objects):
+            scene_collection.objects.link(o)
+        for coll in list(o.users_collection):
+            if coll != scene_collection:
+                coll.objects.unlink(o)
+    print(f"[+] DEBUG [Task 5]: Linked all {len(new_objs)} objects to Scene Collection.")
+                
+    # 6. Verify imported furniture is not hidden
+    for o in new_objs:
+        o.hide_viewport = False
+        o.hide_render = False
+        o.hide_set(False)
+    print(f"[+] DEBUG [Task 6]: Forced all imported objects to be visible (hide_viewport=False, hide_render=False).")
+                
+    # 6b. FIX CRITICAL BUG: FBX assets import with Alpha=0.0 on all materials,
+    # making them 100% transparent/invisible. Force Alpha=1.0 and OPAQUE blend.
+    for o in new_objs:
+        if o.type == 'MESH' and o.data and o.data.materials:
+            for mat in o.data.materials:
+                if mat and mat.node_tree:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'BSDF_PRINCIPLED':
+                            alpha_input = node.inputs.get('Alpha')
+                            if alpha_input and alpha_input.default_value < 0.5:
+                                alpha_input.default_value = 1.0
+                    if hasattr(mat, 'blend_method'):
+                        mat.blend_method = 'OPAQUE'
+    print(f"[+] DEBUG [Task 6b]: Fixed Alpha=1.0 and blend_method=OPAQUE on all imported materials.")
+                
+    # Calculate bounding box of the imported meshes to scale them to the target size
+    meshes = [o for o in new_objs if o.type == 'MESH']
+    dim_x, dim_y, dim_z = 1.0, 1.0, 1.0
+    cx_b, cy_b, cz_b = 0.0, 0.0, 0.0
+    
+    if meshes:
+        # Force evaluation of dependency graph to get accurate world matrices
+        bpy.context.view_layer.update()
+        
+        # Calculate local bounding box dimensions in their default state
+        min_x = min(min((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_x = max(max((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
+        min_y = min(min((o.matrix_world @ v.co).y for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_y = max(max((o.matrix_world @ v.co).y for v in o.data.vertices) for o in meshes if o.data.vertices)
+        min_z = min(min((o.matrix_world @ v.co).z for v in o.data.vertices) for o in meshes if o.data.vertices)
+        max_z = max(max((o.matrix_world @ v.co).z for v in o.data.vertices) for o in meshes if o.data.vertices)
+        
+        dim_x = abs(max_x - min_x)
+        dim_y = abs(max_y - min_y)
+        dim_z = abs(max_z - min_z)
+        
+        # Center the imported objects around the empty's local origin (pivot at bottom)
+        cx_b = (min_x + max_x) / 2
+        cy_b = (min_y + max_y) / 2
+        cz_b = min_z
+
+    # Reparent root-level imported objects to the empty parent
+    roots = [o for o in new_objs if o.parent not in new_objs]
+    for o in roots:
+        o.location.x -= cx_b
+        o.location.y -= cy_b
+        o.location.z -= cz_b
+        
+    bpy.context.view_layer.update()
+        
+    # Group under an empty parent at location
+    # 7. Verify furniture is not placed below the floor (Z >= 0)
+    target_loc = list(location)
+    if target_loc[2] < 0.0:
+        print(f"[Warning] [Task 7]: Adjusting target location Z {target_loc[2]} to 0.0 (must be >= 0.0).")
+        target_loc[2] = 0.0
+        
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=target_loc)
+    asset_parent = bpy.context.active_object
+    asset_parent.name = f"Asset_{asset_name}_Instance"
+    asset_parent.parent = parent
+    asset_parent.rotation_euler[2] = rot_z
+    
+    for o in roots:
+        o.parent = asset_parent
+        o.matrix_parent_inverse.identity()
+        
+    # 8. Verify furniture scale is not zero
+    if meshes and size:
+        tx, ty, tz = size
+        sx = tx / dim_x if dim_x > 0.01 else 1.0
+        sy = ty / dim_y if dim_y > 0.01 else 1.0
+        sz = tz / dim_z if dim_z > 0.01 else 1.0
+        
+        # Prevent zero scaling
+        sx = max(sx, 0.001)
+        sy = max(sy, 0.001)
+        sz = max(sz, 0.001)
+        
+        asset_parent.scale = (sx, sy, sz)
+        print(f"[+] DEBUG [Task 8]: Placed scale set to {asset_parent.scale} (no zero scale).")
+        
+    # 9. & 10. Log every furniture placement operation and verify location is within room bounds
+    bpy.context.view_layer.update()
+    final_world_loc = asset_parent.matrix_world.translation
+    print(f"[+] DEBUG [Task 9/10]: PLACED furniture '{asset_name}' successfully!")
+    print(f"    - Target empty parent name: {asset_parent.name}")
+    print(f"    - Parent empty parent name: {parent.name if parent else 'None'}")
+    print(f"    - Final World Location: {final_world_loc}")
+    print(f"    - Target scale: {asset_parent.scale}")
+    
+    return asset_parent
+
+
 # =============================================================================
 # PROCEDURAL FURNITURE ASSET LIBRARY
 # =============================================================================
@@ -299,24 +465,27 @@ def load_glb_furniture_asset(asset_name, location, size, rot_z, parent):
         for coll in list(o.users_collection):
             if coll != scene_collection:
                 coll.objects.unlink(o)
-        
-    # Group under an empty parent at location
-    bpy.ops.object.empty_add(type='PLAIN_AXES', location=location)
-    asset_parent = bpy.context.active_object
-    asset_parent.name = f"Asset_{asset_name}_Instance"
-    asset_parent.parent = parent
-    asset_parent.rotation_euler[2] = rot_z
-    
-    # Reparent root-level imported objects to the empty parent
-    roots = [o for o in new_objs if o.parent not in new_objs]
-    for o in roots:
-        o.parent = asset_parent
-        o.matrix_parent_inverse.identity()
-        
-    # Calculate bounding box of the imported meshes to scale them to the target size
+
+    # Fix Alpha=0 bug on imported materials (same as FBX fix)
+    for o in new_objs:
+        if o.type == 'MESH' and o.data and o.data.materials:
+            for mat in o.data.materials:
+                if mat and mat.node_tree:
+                    for node in mat.node_tree.nodes:
+                        if node.type == 'BSDF_PRINCIPLED':
+                            alpha_input = node.inputs.get('Alpha')
+                            if alpha_input and alpha_input.default_value < 0.5:
+                                alpha_input.default_value = 1.0
+                    if hasattr(mat, 'blend_method'):
+                        mat.blend_method = 'OPAQUE'
+                
+
     meshes = [o for o in new_objs if o.type == 'MESH']
-    if meshes and size:
-        # Calculate local bounding box dimensions
+    dim_x, dim_y, dim_z = 1.0, 1.0, 1.0
+    cx_b, cy_b, cz_b = 0.0, 0.0, 0.0
+    
+    if meshes:
+        bpy.context.view_layer.update()
         min_x = min(min((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
         max_x = max(max((o.matrix_world @ v.co).x for v in o.data.vertices) for o in meshes if o.data.vertices)
         min_y = min(min((o.matrix_world @ v.co).y for v in o.data.vertices) for o in meshes if o.data.vertices)
@@ -328,17 +497,32 @@ def load_glb_furniture_asset(asset_name, location, size, rot_z, parent):
         dim_y = abs(max_y - min_y)
         dim_z = abs(max_z - min_z)
         
-        # Center the imported objects around the empty's local origin (pivot at bottom)
         cx_b = (min_x + max_x) / 2
         cy_b = (min_y + max_y) / 2
         cz_b = min_z
+
+    # Reparent root-level imported objects to the empty parent
+    roots = [o for o in new_objs if o.parent not in new_objs]
+    for o in roots:
+        o.location.x -= cx_b
+        o.location.y -= cy_b
+        o.location.z -= cz_b
         
-        for o in roots:
-            o.location.x -= cx_b
-            o.location.y -= cy_b
-            o.location.z -= cz_b
-            
-        # Apply scaling on parent to match target size
+    bpy.context.view_layer.update()
+        
+    # Group under an empty parent at location
+    bpy.ops.object.empty_add(type='PLAIN_AXES', location=location)
+    asset_parent = bpy.context.active_object
+    asset_parent.name = f"Asset_{asset_name}_Instance"
+    asset_parent.parent = parent
+    asset_parent.rotation_euler[2] = rot_z
+    
+    for o in roots:
+        o.parent = asset_parent
+        o.matrix_parent_inverse.identity()
+        
+    # Apply scaling on parent to match target size
+    if meshes and size:
         tx, ty, tz = size
         sx = tx / dim_x if dim_x > 0.01 else 1.0
         sy = ty / dim_y if dim_y > 0.01 else 1.0
@@ -449,7 +633,18 @@ def build_sofa(name, loc, size, rot_z, materials, parent):
     sofa_grp.parent = parent
     sofa_grp.rotation_euler[2] = rot_z
     
-    sofa_asset = load_glb_furniture_asset("sofa", (0, 0, 0), (w, d, h), 0.0, sofa_grp)
+    # Pick a suitable Couch FBX from the library
+    sofa_name = "Couch_Large1"
+    if w < 1.4:
+        sofa_name = "Couch_Small1"
+    elif w < 1.8:
+        sofa_name = "Couch_Medium1"
+    elif w >= 2.2:
+        sofa_name = "Couch_L"
+        
+    sofa_asset = load_fbx_furniture_asset(sofa_name, (0, 0, 0), (w, d, h), 0.0, sofa_grp)
+    if not sofa_asset:
+        sofa_asset = load_glb_furniture_asset("sofa", (0, 0, 0), (w, d, h), 0.0, sofa_grp)
     if not sofa_asset:
         # Sofa Base frame
         create_cube("Base", (0, 0, 0.1), (w, d, 0.15), materials['fabric_sofa'], sofa_grp)
@@ -483,7 +678,12 @@ def build_bed(name, loc, size, rot_z, materials, parent):
     bed_grp.parent = parent
     bed_grp.rotation_euler[2] = rot_z
     
-    bed_asset = load_glb_furniture_asset("bed", (0, 0, 0), (w, d, h), 0.0, bed_grp)
+    # Pick a suitable Bed FBX
+    bed_name = "Bed_King" if w >= 1.5 else "Bed_Single"
+    
+    bed_asset = load_fbx_furniture_asset(bed_name, (0, 0, 0), (w, d, h), 0.0, bed_grp)
+    if not bed_asset:
+        bed_asset = load_glb_furniture_asset("bed", (0, 0, 0), (w, d, h), 0.0, bed_grp)
     if not bed_asset:
         # Hardwood bed frame
         create_cube("Frame", (0, 0, 0.1), (w, d, 0.2), materials['wood_door'], bed_grp)
@@ -497,6 +697,9 @@ def build_bed(name, loc, size, rot_z, materials, parent):
         # Folded blanket aesthetic overlay
         create_cube("BlanketFold", (0, -d/4, 0.47), (w - 0.06, d/2 - 0.1, 0.02), materials['fabric_blanket'], bed_grp)
         
+    # Put a beautiful carpet under the bed
+    load_fbx_furniture_asset("Carpet_1", (0, -0.2, 0.01), (w * 1.3, d * 1.2, 0.02), 0.0, bed_grp)
+    
     return bed_grp
 
 def build_dining_table(name, loc, size, rot_z, materials, parent):
@@ -509,7 +712,10 @@ def build_dining_table(name, loc, size, rot_z, materials, parent):
     table_grp.parent = parent
     table_grp.rotation_euler[2] = rot_z
     
-    table_asset = load_glb_furniture_asset("dining_table", (0, 0, 0), (w, d, h), 0.0, table_grp)
+    table_name = "Table_RoundLarge" if w >= 1.2 else "Table_RoundSmall"
+    table_asset = load_fbx_furniture_asset(table_name, (0, 0, 0), (w, d, h), 0.0, table_grp)
+    if not table_asset:
+        table_asset = load_glb_furniture_asset("dining_table", (0, 0, 0), (w, d, h), 0.0, table_grp)
     if not table_asset:
         # Wooden Table top with smooth beveled borders
         create_cube("TableTop", (0, 0, h - 0.02), (w, d, 0.04), materials['wood_door'], table_grp)
@@ -527,8 +733,10 @@ def build_dining_table(name, loc, size, rot_z, materials, parent):
             chair_name = f"Chair_{idx}_{c_idx}"
             br_rot = math.pi if cy_off > 0 else 0.0
             
-            # Try to load chair asset
-            chair_asset = load_glb_furniture_asset("chair", (cx_off, cy_off, 0.0), (ch_w, ch_d, ch_h + 0.45), br_rot, table_grp)
+            # Try to load FBX chair
+            chair_asset = load_fbx_furniture_asset("Chair_1", (cx_off, cy_off, 0.0), (ch_w, ch_d, ch_h + 0.45), br_rot, table_grp)
+            if not chair_asset:
+                chair_asset = load_glb_furniture_asset("chair", (cx_off, cy_off, 0.0), (ch_w, ch_d, ch_h + 0.45), br_rot, table_grp)
             if not chair_asset:
                 # Chair seat
                 create_cube(f"{chair_name}_Seat", (cx_off, cy_off, ch_h), (ch_w, ch_d, 0.03), materials['fabric_cushion'], table_grp)
@@ -551,13 +759,13 @@ def build_tv_unit(name, loc, size, rot_z, materials, parent):
     tv_grp.parent = parent
     tv_grp.rotation_euler[2] = rot_z
     
-    # Credenza base stand
-    create_cube("Credenza", (0, 0, h/2), (w, d, h), materials['wood_door'], tv_grp)
-    # Widescreen TV Panel
+    # Load Shelf_Large as the TV stand base
+    stand_asset = load_fbx_furniture_asset("Shelf_Large", (0, 0, 0), (w, d, h), 0.0, tv_grp)
+    
+    # TV Screen and stand on top
     tv_w = w * 0.82
     tv_h = 0.85
     create_cube("TVScreen", (0, 0, h + tv_h/2 + 0.05), (tv_w, 0.04, tv_h), materials['dark_metal'], tv_grp)
-    # Chrome base stand
     create_cube("TVStand", (0, 0, h + 0.025), (0.28, 0.18, 0.05), materials['metal'], tv_grp)
     return tv_grp
 
@@ -571,7 +779,10 @@ def build_wardrobe(name, loc, size, rot_z, materials, parent):
     wd_grp.parent = parent
     wd_grp.rotation_euler[2] = rot_z
     
-    wardrobe_asset = load_glb_furniture_asset("wardrobe", (0, 0, 0), (w, d, h), 0.0, wd_grp)
+    # Bookshelf.fbx replaces wardrobe in bedroom
+    wardrobe_asset = load_fbx_furniture_asset("Bookshelf", (0, 0, 0), (w, d, h), 0.0, wd_grp)
+    if not wardrobe_asset:
+        wardrobe_asset = load_glb_furniture_asset("wardrobe", (0, 0, 0), (w, d, h), 0.0, wd_grp)
     if not wardrobe_asset:
         # Wardrobe cabinet box
         create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], wd_grp)
@@ -593,9 +804,12 @@ def build_side_table(name, loc, size, rot_z, materials, parent):
     st_grp.parent = parent
     st_grp.rotation_euler[2] = rot_z
     
-    create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], st_grp)
-    create_cube("TopSlab", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['wood_door'], st_grp)
-    create_cylinder("DrawerHandle", (0, d/2 + 0.015, h * 0.65), 0.01, 0.06, rotation=(0, 0, 0), material=materials['metal'], parent=st_grp)
+    # Load Nightstand FBX asset
+    ns_asset = load_fbx_furniture_asset("NightStand_1", (0, 0, 0), (w, d, h), 0.0, st_grp)
+    if not ns_asset:
+        create_cube("Cabinet", (0, 0, h/2), (w, d, h), materials['wood_door'], st_grp)
+        create_cube("TopSlab", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['wood_door'], st_grp)
+        create_cylinder("DrawerHandle", (0, d/2 + 0.015, h * 0.65), 0.01, 0.06, rotation=(0, 0, 0), material=materials['metal'], parent=st_grp)
     return st_grp
 
 def build_coffee_table(name, loc, size, rot_z, materials, parent):
@@ -608,10 +822,17 @@ def build_coffee_table(name, loc, size, rot_z, materials, parent):
     ct_grp.parent = parent
     ct_grp.rotation_euler[2] = rot_z
     
-    create_cube("GlassTop", (0, 0, h - 0.01), (w, d, 0.02), materials['glass'], ct_grp)
-    for lx in [-w/2 + 0.05, w/2 - 0.05]:
-        for ly in [-d/2 + 0.05, d/2 - 0.05]:
-            create_cylinder("MetalLeg", (lx, ly, (h - 0.02)/2), 0.02, h - 0.02, material=materials['metal'], parent=ct_grp)
+    # Table_RoundSmall2 or Table_RoundSmall
+    ct_asset = load_fbx_furniture_asset("Table_RoundSmall2", (0, 0, 0), (w, d, h), 0.0, ct_grp)
+    if not ct_asset:
+        create_cube("GlassTop", (0, 0, h - 0.01), (w, d, 0.02), materials['glass'], ct_grp)
+        for lx in [-w/2 + 0.05, w/2 - 0.05]:
+            for ly in [-d/2 + 0.05, d/2 - 0.05]:
+                create_cylinder("MetalLeg", (lx, ly, (h - 0.02)/2), 0.02, h - 0.02, material=materials['metal'], parent=ct_grp)
+                
+    # Place Carpet_Round under coffee table
+    load_fbx_furniture_asset("Carpet_Round", (0, 0, 0.01), (w * 2.2, d * 2.2, 0.02), 0.0, ct_grp)
+    
     return ct_grp
 
 def build_toilet(name, loc, rot_z, materials, parent):
@@ -623,7 +844,10 @@ def build_toilet(name, loc, rot_z, materials, parent):
     t_grp.parent = parent
     t_grp.rotation_euler[2] = rot_z
     
-    toilet_asset = load_glb_furniture_asset("toilet", (0, 0, 0), (0.45, 0.66, 0.8), 0.0, t_grp)
+    # Load Bathroom_Toilet or Bathroom_Toilet2
+    toilet_asset = load_fbx_furniture_asset("Bathroom_Toilet", (0, 0, 0), (0.45, 0.66, 0.8), 0.0, t_grp)
+    if not toilet_asset:
+        toilet_asset = load_glb_furniture_asset("toilet", (0, 0, 0), (0.45, 0.66, 0.8), 0.0, t_grp)
     if not toilet_asset:
         # Porcelain flush water tank
         create_cube("WaterTank", (0, 0.22, 0.52), (0.45, 0.22, 0.5), materials['toilet_material'], t_grp)
@@ -645,18 +869,20 @@ def build_vanity(name, loc, size, rot_z, materials, parent):
     v_grp.parent = parent
     v_grp.rotation_euler[2] = rot_z
     
-    # Floating drawer vanity block
-    create_cube("VanityDrawer", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], v_grp)
-    # Polished Marble Countertop
-    create_cube("VanityTop", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['kitchen_surface'], v_grp)
-    
-    # Try to load sink asset
-    sink_asset = load_glb_furniture_asset("sink", (0, 0, h + 0.015), (w * 0.65, d * 0.65, 0.16), 0.0, v_grp)
-    if not sink_asset:
+    # Load Bathroom_Sink as the vanity block
+    vanity_asset = load_fbx_furniture_asset("Bathroom_Sink", (0, 0, 0), (w, d, h), 0.0, v_grp)
+    if not vanity_asset:
+        # Floating drawer vanity block
+        create_cube("VanityDrawer", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], v_grp)
+        # Polished Marble Countertop
+        create_cube("VanityTop", (0, 0, h - 0.02), (w + 0.02, d + 0.02, 0.04), materials['kitchen_surface'], v_grp)
         # Porcelain Wash Basin Sink
         create_cube("Basin", (0, 0, h + 0.015), (w * 0.65, d * 0.65, 0.03), materials['toilet_material'], v_grp)
         # Chrome goose faucet
         create_cylinder("Faucet", (0, -d*0.22, h + 0.1), 0.015, 0.16, rotation=(0, 0, 0), material=materials['metal'], parent=v_grp)
+        
+    # Put a mirror above the vanity
+    load_fbx_furniture_asset("Bathroom_Mirror1", (0, 0, h + 0.4), (w * 0.8, 0.05, 0.6), 0.0, v_grp)
     return v_grp
 
 def build_shower(name, loc, size, rot_z, materials, parent):
@@ -669,15 +895,19 @@ def build_shower(name, loc, size, rot_z, materials, parent):
     sh_grp.parent = parent
     sh_grp.rotation_euler[2] = rot_z
     
-    # Concrete tile shower tray
-    create_cube("ShowerTray", (0, 0, 0.04), (w, d, 0.08), materials['tile'], sh_grp)
-    # Translucent glass partition panel 1
-    create_cube("GlassPanel_W", (-w/2 + 0.01, 0, h/2), (0.02, d, h), materials['glass'], sh_grp)
-    # Glass partition panel 2
-    create_cube("GlassPanel_N", (0, d/2 - 0.01, h/2), (w, 0.02, h), materials['glass'], sh_grp)
-    # Chrome vertical shower column and head
-    create_cylinder("ShowerPipe", (-w*0.35, d*0.35, 1.1), 0.012, 1.8, rotation=(0, 0, 0), material=materials['metal'], parent=sh_grp)
-    create_cylinder("ShowerHead", (-w*0.35, d*0.35 - 0.05, 2.0), 0.08, 0.02, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=sh_grp)
+    # If the bathroom/shower area is large, load Bathtub, else Shower
+    shower_name = "Bathroom_Bathtub" if w >= 1.4 else "Bathroom_Shower1"
+    shower_asset = load_fbx_furniture_asset(shower_name, (0, 0, 0), (w, d, h), 0.0, sh_grp)
+    if not shower_asset:
+        # Concrete tile shower tray
+        create_cube("ShowerTray", (0, 0, 0.04), (w, d, 0.08), materials['tile'], sh_grp)
+        # Translucent glass partition panel 1
+        create_cube("GlassPanel_W", (-w/2 + 0.01, 0, h/2), (0.02, d, h), materials['glass'], sh_grp)
+        # Glass partition panel 2
+        create_cube("GlassPanel_N", (0, d/2 - 0.01, h/2), (w, 0.02, h), materials['glass'], sh_grp)
+        # Chrome vertical shower column and head
+        create_cylinder("ShowerPipe", (-w*0.35, d*0.35, 1.1), 0.012, 1.8, rotation=(0, 0, 0), material=materials['metal'], parent=sh_grp)
+        create_cylinder("ShowerHead", (-w*0.35, d*0.35 - 0.05, 2.0), 0.08, 0.02, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=sh_grp)
     return sh_grp
 
 def build_kitchen_cabinet(name, loc, size, rot_z, materials, parent):
@@ -690,20 +920,23 @@ def build_kitchen_cabinet(name, loc, size, rot_z, materials, parent):
     k_grp.parent = parent
     k_grp.rotation_euler[2] = rot_z
     
-    kitchen_asset = load_glb_furniture_asset("kitchen", (0, 0, 0), (w, d, h), 0.0, k_grp)
-    if not kitchen_asset:
+    # Load Kitchen_Cabinet1
+    cabinet_asset = load_fbx_furniture_asset("Kitchen_Cabinet1", (0, 0, 0), (w, d, h), 0.0, k_grp)
+    if not cabinet_asset:
+        cabinet_asset = load_glb_furniture_asset("kitchen", (0, 0, 0), (w, d, h), 0.0, k_grp)
+    if not cabinet_asset:
         # Kitchen counter cabinet base structure
         create_cube("CabinetBase", (0, 0, h/2), (w, d, h - 0.04), materials['wood_door'], k_grp)
         # Polished Marble countertop slab
         create_cube("KitchenCounter", (0, 0, h - 0.02), (w + 0.01, d + 0.01, 0.04), materials['kitchen_surface'], k_grp)
+        # Inset metal dual-sink sink
+        create_cube("KitchenSink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.01), materials['metal'], k_grp)
+        # Chrome faucet neck
+        create_cylinder("GooseFaucet", (0, d*0.22, h + 0.16), 0.016, 0.32, rotation=(0, 0, 0), material=materials['metal'], parent=k_grp)
+    else:
+        # Add Kitchen_Sink FBX inset on top/in the middle
+        load_fbx_furniture_asset("Kitchen_Sink", (0, 0.05, h - 0.1), (w * 0.6, d * 0.8, 0.2), 0.0, k_grp)
         
-        # Try to load sink asset
-        sink_asset = load_glb_furniture_asset("sink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.16), 0.0, k_grp)
-        if not sink_asset:
-            # Inset metal dual-sink sink
-            create_cube("KitchenSink", (0, 0, h + 0.005), (w * 0.42, d * 0.65, 0.01), materials['metal'], k_grp)
-            # Chrome faucet neck
-            create_cylinder("GooseFaucet", (0, d*0.22, h + 0.16), 0.016, 0.32, rotation=(0, 0, 0), material=materials['metal'], parent=k_grp)
     return k_grp
 
 def build_refrigerator(name, loc, size, rot_z, materials, parent):
@@ -716,15 +949,18 @@ def build_refrigerator(name, loc, size, rot_z, materials, parent):
     f_grp.parent = parent
     f_grp.rotation_euler[2] = rot_z
     
-    # Refrigerator metal cabinet box
-    create_cube("Body", (0, 0, h/2), (w, d, h), materials['metal'], f_grp)
-    # Fridge Door Panel upper
-    create_cube("DoorUpper", (0, d/2 + 0.01, h * 0.65), (w - 0.02, 0.02, h * 0.65), materials['metal'], f_grp)
-    # Freezer Door Panel lower
-    create_cube("DoorLower", (0, d/2 + 0.01, h * 0.18), (w - 0.02, 0.02, h * 0.32), materials['metal'], f_grp)
-    # Chrome handles
-    create_cylinder("HandleUpper", (-w*0.35, d/2 + 0.03, h*0.62), 0.012, 0.45, rotation=(0, 0, 0), material=materials['metal'], parent=f_grp)
-    create_cylinder("HandleLower", (-w*0.35, d/2 + 0.03, h*0.26), 0.012, 0.22, rotation=(0, 0, 0), material=materials['metal'], parent=f_grp)
+    # Load Kitchen_Fridge FBX
+    fridge_asset = load_fbx_furniture_asset("Kitchen_Fridge", (0, 0, 0), (w, d, h), 0.0, f_grp)
+    if not fridge_asset:
+        # Refrigerator metal cabinet box
+        create_cube("Body", (0, 0, h/2), (w, d, h), materials['metal'], f_grp)
+        # Fridge Door Panel upper
+        create_cube("DoorUpper", (0, d/2 + 0.01, h * 0.65), (w - 0.02, 0.02, h * 0.65), materials['metal'], f_grp)
+        # Freezer Door Panel lower
+        create_cube("DoorLower", (0, d/2 + 0.01, h * 0.18), (w - 0.02, 0.02, h * 0.32), materials['metal'], f_grp)
+        # Chrome handles
+        create_cylinder("HandleUpper", (-w*0.35, d/2 + 0.03, h*0.62), 0.012, 0.45, rotation=(0, 0, 0), material=materials['metal'], parent=f_grp)
+        create_cylinder("HandleLower", (-w*0.35, d/2 + 0.03, h*0.26), 0.012, 0.22, rotation=(0, 0, 0), material=materials['metal'], parent=f_grp)
     return f_grp
 
 def build_oven(name, loc, size, rot_z, materials, parent):
@@ -737,15 +973,18 @@ def build_oven(name, loc, size, rot_z, materials, parent):
     ov_grp.parent = parent
     ov_grp.rotation_euler[2] = rot_z
     
-    # Cooktop range oven body
-    create_cube("Body", (0, 0, h/2), (w, d, h), materials['dark_metal'], ov_grp)
-    # Front glass window door
-    create_cube("GlassDoor", (0, d/2 + 0.01, h*0.42), (w - 0.08, 0.02, h*0.6), materials['glass'], ov_grp)
-    # Handle bar
-    create_cylinder("HandleBar", (0, d/2 + 0.03, h*0.68), 0.012, w*0.75, rotation=(0, math.pi/2, 0), material=materials['metal'], parent=ov_grp)
-    # Dial knobs
-    for idx, kx in enumerate([-0.18, -0.06, 0.06, 0.18]):
-        create_cylinder(f"Knob_{idx}", (kx, d/2 + 0.015, h - 0.06), 0.02, 0.03, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=ov_grp)
+    # Load Kitchen_Oven FBX
+    oven_asset = load_fbx_furniture_asset("Kitchen_Oven", (0, 0, 0), (w, d, h), 0.0, ov_grp)
+    if not oven_asset:
+        # Cooktop range oven body
+        create_cube("Body", (0, 0, h/2), (w, d, h), materials['dark_metal'], ov_grp)
+        # Front glass window door
+        create_cube("GlassDoor", (0, d/2 + 0.01, h*0.42), (w - 0.08, 0.02, h*0.6), materials['glass'], ov_grp)
+        # Handle bar
+        create_cylinder("HandleBar", (0, d/2 + 0.03, h*0.68), 0.012, w*0.75, rotation=(0, math.pi/2, 0), material=materials['metal'], parent=ov_grp)
+        # Dial knobs
+        for idx, kx in enumerate([-0.18, -0.06, 0.06, 0.18]):
+            create_cylinder(f"Knob_{idx}", (kx, d/2 + 0.015, h - 0.06), 0.02, 0.03, rotation=(math.pi/2, 0, 0), material=materials['metal'], parent=ov_grp)
     return ov_grp
 
 def build_office_desk(name, loc, size, rot_z, materials, parent):
@@ -758,20 +997,23 @@ def build_office_desk(name, loc, size, rot_z, materials, parent):
     off_grp.parent = parent
     off_grp.rotation_euler[2] = rot_z
     
-    # Wooden desk board
-    create_cube("DeskBoard", (0, 0, h - 0.02), (w, d, 0.04), materials['wood_door'], off_grp)
-    # Drawer filing cabinet base block (West side)
-    create_cube("FilingCabinet", (-w/2 + 0.22, 0, (h - 0.04)/2), (0.38, d * 0.9, h - 0.04), materials['wood_door'], off_grp)
-    # Sturdy metal desk support legs
-    for ly in [-d/2 + 0.06, d/2 - 0.06]:
-        create_cylinder("DeskLeg", (w/2 - 0.08, ly, (h - 0.04)/2), 0.028, h - 0.04, material=materials['metal'], parent=off_grp)
-        
-    # Widescreen office LCD screen stand
-    mon_w = 0.52
-    mon_h = 0.35
-    create_cube("MonitorScreen", (0, -0.06, h + mon_h/2 + 0.08), (mon_w, 0.02, mon_h), materials['dark_metal'], off_grp)
-    create_cylinder("MonitorStand", (0, -0.06, h + 0.04), 0.015, 0.08, material=materials['metal'], parent=off_grp)
-    create_cube("MonitorBase", (0, -0.06, h + 0.01), (0.18, 0.12, 0.02), materials['dark_metal'], off_grp)
+    # Load Table_RoundLarge as desk
+    desk_asset = load_fbx_furniture_asset("Table_RoundLarge", (0, 0, 0), (w, d, h), 0.0, off_grp)
+    if not desk_asset:
+        # Wooden desk board
+        create_cube("DeskBoard", (0, 0, h - 0.02), (w, d, 0.04), materials['wood_door'], off_grp)
+        # Drawer filing cabinet base block (West side)
+        create_cube("FilingCabinet", (-w/2 + 0.22, 0, (h - 0.04)/2), (0.38, d * 0.9, h - 0.04), materials['wood_door'], off_grp)
+        # Sturdy metal desk support legs
+        for ly in [-d/2 + 0.06, d/2 - 0.06]:
+            create_cylinder("DeskLeg", (w/2 - 0.08, ly, (h - 0.04)/2), 0.028, h - 0.04, material=materials['metal'], parent=off_grp)
+            
+    # Add a Chair_1 for the office desk
+    load_fbx_furniture_asset("Chair_1", (0, -0.45, 0.0), (0.45, 0.45, 0.95), 0.0, off_grp)
+    
+    # Add a Cylinder trashcan
+    load_fbx_furniture_asset("Trashcan_Cylindric", (0.5, 0.35, 0.0), (0.24, 0.24, 0.32), 0.0, off_grp)
+    
     return off_grp
 
 # =============================================================================
@@ -1019,35 +1261,348 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
             avail_l = room_l - 0.6
             if avail_w <= 0.4 or avail_l <= 0.4: continue
             
-            # Position dynamic assets in context of door locations
+            # Identify door centers relative to this room boundary (tolerance of 0.3m)
+            room_doors = []
+            for door in doors:
+                dcx, dcy = door["center"]
+                dbx, dby = to_blender_coords(dcx, dcy, width, height, scale)
+                if (x1 - 0.3 <= dbx <= x2 + 0.3) and (min(y1, y2) - 0.3 <= dby <= max(y1, y2) + 0.3):
+                    dist_n = abs(dby - y1)
+                    dist_s = abs(dby - y2)
+                    dist_w = abs(dbx - x1)
+                    dist_e = abs(dbx - x2)
+                    min_d = min(dist_n, dist_s, dist_w, dist_e)
+                    if min_d < 0.5:
+                        wall_side = "N" if min_d == dist_n else ("S" if min_d == dist_s else ("W" if min_d == dist_w else "E"))
+                        room_doors.append({"loc": (dbx, dby), "wall": wall_side})
+            
+            # Identify window centers relative to this room boundary
+            room_windows = []
+            for win in windows:
+                wx1, wy1 = win["start"]
+                wx2, wy2 = win["end"]
+                w_cx = (wx1 + wx2) / 2
+                w_cy = (wy1 + wy2) / 2
+                wbx, wby = to_blender_coords(w_cx, w_cy, width, height, scale)
+                if (x1 - 0.3 <= wbx <= x2 + 0.3) and (min(y1, y2) - 0.3 <= wby <= max(y1, y2) + 0.3):
+                    dist_n = abs(wby - y1)
+                    dist_s = abs(wby - y2)
+                    dist_w = abs(wbx - x1)
+                    dist_e = abs(wbx - x2)
+                    min_d = min(dist_n, dist_s, dist_w, dist_e)
+                    if min_d < 0.5:
+                        wall_side = "N" if min_d == dist_n else ("S" if min_d == dist_s else ("W" if min_d == dist_w else "E"))
+                        room_windows.append({"loc": (wbx, wby), "wall": wall_side})
+
+            def is_blocking_walkway(tx, ty, min_dist=0.85):
+                # Ensure no furniture blocks door entrances
+                for d in room_doors:
+                    dx, dy = d["loc"]
+                    if math.sqrt((tx - dx)**2 + (ty - dy)**2) < min_dist:
+                        return True
+                return False
+
+            # Function to score wall suitability for main furniture (higher score is better)
+            def score_wall(wall):
+                score = 100
+                # Don't place against walls with doors
+                for d in room_doors:
+                    if d["wall"] == wall:
+                        score -= 90
+                # Try to avoid windows too
+                for w in room_windows:
+                    if w["wall"] == wall:
+                        score -= 30
+                # Prefer North/South walls for aesthetic isometric view
+                if wall in ("N", "S"):
+                    score += 5
+                return score
+
+            # Position dynamic assets in context of door locations & align to walls
             if canonical == "bedroom":
-                build_bed(f"BedSet_F{floor_idx}_{room['id']}", (cx, y1 - 1.25, z_offset), (1.6, 2.0, 0.6), 0.0, materials, floor_parent)
-                # Place side tables flanking the bed if there is enough room width
-                if room_w >= 3.4:
-                    build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (cx - 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
-                    build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (cx + 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
-                elif room_w >= 2.6:
-                    build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (cx + 1.05, y1 - 0.5, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
-                if avail_l > 2.8:
-                    build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (x1 + 0.6, cy, z_offset), (1.6, 0.6, 2.2), math.pi/2, materials, floor_parent)
+                # Find best wall for the headboard of the bed
+                walls_to_try = sorted(["N", "S", "W", "E"], key=score_wall, reverse=True)
+                bed_placed = False
+                for wall in walls_to_try:
+                    bed_w, bed_l = 1.6, 2.0
+                    # Let's auto-scale if bedroom is small
+                    if room_w < 2.8 or room_l < 2.8:
+                        bed_w, bed_l = 1.2, 1.9  # Auto scale single bed
+                    
+                    if wall == "N":
+                        bx_loc, by_loc = cx, y1 - bed_l/2
+                        # Shift along wall if near a door
+                        if is_blocking_walkway(bx_loc, by_loc):
+                            # Try shifting left
+                            if not is_blocking_walkway(cx - 0.6, by_loc) and (cx - 0.6 - bed_w/2 >= x1 + 0.2):
+                                bx_loc = cx - 0.6
+                            # Try shifting right
+                            elif not is_blocking_walkway(cx + 0.6, by_loc) and (cx + 0.6 + bed_w/2 <= x2 - 0.2):
+                                bx_loc = cx + 0.6
+                        if not is_blocking_walkway(bx_loc, by_loc):
+                            build_bed(f"BedSet_F{floor_idx}_{room['id']}", (bx_loc, by_loc, z_offset), (bed_w, bed_l, 0.6), 0.0, materials, floor_parent)
+                            # Side tables flanking the bed
+                            if room_w >= 3.2 and not is_blocking_walkway(bx_loc - 0.95, y1 - 0.25) and not is_blocking_walkway(bx_loc + 0.95, y1 - 0.25):
+                                build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (bx_loc - 0.95, y1 - 0.25, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (bx_loc + 0.95, y1 - 0.25, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
+                            elif room_w >= 2.5 and not is_blocking_walkway(bx_loc + 0.85, y1 - 0.25):
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (bx_loc + 0.85, y1 - 0.25, z_offset), (0.45, 0.45, 0.55), 0.0, materials, floor_parent)
+                            # Wardrobe on the opposite or side wall
+                            w_wall = "W" if score_wall("W") >= score_wall("E") else "E"
+                            w_rot = math.pi/2 if w_wall == "W" else -math.pi/2
+                            wx = x1 + 0.35 if w_wall == "W" else x2 - 0.35
+                            if not is_blocking_walkway(wx, cy):
+                                build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (wx, cy, z_offset), (1.4, 0.55, 2.1), w_rot, materials, floor_parent)
+                            bed_placed = True
+                            break
+                    elif wall == "S":
+                        bx_loc, by_loc = cx, y2 + bed_l/2
+                        if is_blocking_walkway(bx_loc, by_loc):
+                            if not is_blocking_walkway(cx - 0.6, by_loc) and (cx - 0.6 - bed_w/2 >= x1 + 0.2):
+                                bx_loc = cx - 0.6
+                            elif not is_blocking_walkway(cx + 0.6, by_loc) and (cx + 0.6 + bed_w/2 <= x2 - 0.2):
+                                bx_loc = cx + 0.6
+                        if not is_blocking_walkway(bx_loc, by_loc):
+                            build_bed(f"BedSet_F{floor_idx}_{room['id']}", (bx_loc, by_loc, z_offset), (bed_w, bed_l, 0.6), math.pi, materials, floor_parent)
+                            if room_w >= 3.2 and not is_blocking_walkway(bx_loc - 0.95, y2 + 0.25) and not is_blocking_walkway(bx_loc + 0.95, y2 + 0.25):
+                                build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (bx_loc - 0.95, y2 + 0.25, z_offset), (0.45, 0.45, 0.55), math.pi, materials, floor_parent)
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (bx_loc + 0.95, y2 + 0.25, z_offset), (0.45, 0.45, 0.55), math.pi, materials, floor_parent)
+                            elif room_w >= 2.5 and not is_blocking_walkway(bx_loc + 0.85, y2 + 0.25):
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (bx_loc + 0.85, y2 + 0.25, z_offset), (0.45, 0.45, 0.55), math.pi, materials, floor_parent)
+                            w_wall = "W" if score_wall("W") >= score_wall("E") else "E"
+                            w_rot = math.pi/2 if w_wall == "W" else -math.pi/2
+                            wx = x1 + 0.35 if w_wall == "W" else x2 - 0.35
+                            if not is_blocking_walkway(wx, cy):
+                                build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (wx, cy, z_offset), (1.4, 0.55, 2.1), w_rot, materials, floor_parent)
+                            bed_placed = True
+                            break
+                    elif wall == "W":
+                        bx_loc, by_loc = x1 + bed_l/2, cy
+                        if is_blocking_walkway(bx_loc, by_loc):
+                            if not is_blocking_walkway(bx_loc, cy - 0.6) and (cy - 0.6 - bed_w/2 >= min(y1, y2) + 0.2):
+                                by_loc = cy - 0.6
+                            elif not is_blocking_walkway(bx_loc, cy + 0.6) and (cy + 0.6 + bed_w/2 <= max(y1, y2) - 0.2):
+                                by_loc = cy + 0.6
+                        if not is_blocking_walkway(bx_loc, by_loc):
+                            build_bed(f"BedSet_F{floor_idx}_{room['id']}", (bx_loc, by_loc, z_offset), (bed_w, bed_l, 0.6), math.pi/2, materials, floor_parent)
+                            if room_l >= 3.2 and not is_blocking_walkway(x1 + 0.25, by_loc - 0.95) and not is_blocking_walkway(x1 + 0.25, by_loc + 0.95):
+                                build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (x1 + 0.25, by_loc - 0.95, z_offset), (0.45, 0.45, 0.55), math.pi/2, materials, floor_parent)
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (x1 + 0.25, by_loc + 0.95, z_offset), (0.45, 0.45, 0.55), math.pi/2, materials, floor_parent)
+                            elif room_l >= 2.5 and not is_blocking_walkway(x1 + 0.25, by_loc + 0.85):
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (x1 + 0.25, by_loc + 0.85, z_offset), (0.45, 0.45, 0.55), math.pi/2, materials, floor_parent)
+                            w_wall = "N" if score_wall("N") >= score_wall("S") else "S"
+                            w_rot = 0.0 if w_wall == "N" else math.pi
+                            wy = y1 - 0.35 if w_wall == "N" else y2 + 0.35
+                            if not is_blocking_walkway(cx, wy):
+                                build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (cx, wy, z_offset), (1.4, 0.55, 2.1), w_rot, materials, floor_parent)
+                            bed_placed = True
+                            break
+                    elif wall == "E":
+                        bx_loc, by_loc = x2 - bed_l/2, cy
+                        if is_blocking_walkway(bx_loc, by_loc):
+                            if not is_blocking_walkway(bx_loc, cy - 0.6) and (cy - 0.6 - bed_w/2 >= min(y1, y2) + 0.2):
+                                by_loc = cy - 0.6
+                            elif not is_blocking_walkway(bx_loc, cy + 0.6) and (cy + 0.6 + bed_w/2 <= max(y1, y2) - 0.2):
+                                by_loc = cy + 0.6
+                        if not is_blocking_walkway(bx_loc, by_loc):
+                            build_bed(f"BedSet_F{floor_idx}_{room['id']}", (bx_loc, by_loc, z_offset), (bed_w, bed_l, 0.6), -math.pi/2, materials, floor_parent)
+                            if room_l >= 3.2 and not is_blocking_walkway(x2 - 0.25, by_loc - 0.95) and not is_blocking_walkway(x2 - 0.25, by_loc + 0.95):
+                                build_side_table(f"SideTable_L_F{floor_idx}_{room['id']}", (x2 - 0.25, by_loc - 0.95, z_offset), (0.45, 0.45, 0.55), -math.pi/2, materials, floor_parent)
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (x2 - 0.25, by_loc + 0.95, z_offset), (0.45, 0.45, 0.55), -math.pi/2, materials, floor_parent)
+                            elif room_l >= 2.5 and not is_blocking_walkway(x2 - 0.25, by_loc + 0.85):
+                                build_side_table(f"SideTable_R_F{floor_idx}_{room['id']}", (x2 - 0.25, by_loc + 0.85, z_offset), (0.45, 0.45, 0.55), -math.pi/2, materials, floor_parent)
+                            w_wall = "N" if score_wall("N") >= score_wall("S") else "S"
+                            w_rot = 0.0 if w_wall == "N" else math.pi
+                            wy = y1 - 0.35 if w_wall == "N" else y2 + 0.35
+                            if not is_blocking_walkway(cx, wy):
+                                build_wardrobe(f"Wardrobe_F{floor_idx}_{room['id']}", (cx, wy, z_offset), (1.4, 0.55, 2.1), w_rot, materials, floor_parent)
+                            bed_placed = True
+                            break
+                if not bed_placed:
+                    # Absolute fallback to center if everything is constrained
+                    build_bed(f"BedSet_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.6, 2.0, 0.6), 0.0, materials, floor_parent)
+
             elif canonical in ("living_room", "lounge"):
-                build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (cx, y2 + 0.85, z_offset), (2.0, 0.85, 0.7), 0.0, materials, floor_parent)
-                build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (cx, y1 - 0.5, z_offset), (1.8, 0.45, 0.5), 0.0, materials, floor_parent)
-                # Place coffee table in front of the sofa if there is enough room length
-                if room_l >= 3.2:
-                    build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (cx, y2 + 1.7, z_offset), (1.0, 0.55, 0.42), 0.0, materials, floor_parent)
+                walls_to_try = sorted(["N", "S", "W", "E"], key=score_wall, reverse=True)
+                sofa_placed = False
+                for wall in walls_to_try:
+                    sofa_w, sofa_d = 2.0, 0.85
+                    if room_w < 3.2 or room_l < 3.2:
+                        sofa_w = 1.5  # Auto-scale sofa for smaller rooms
+                    
+                    if wall == "N":
+                        sx, sy = cx, y1 - sofa_d/2
+                        tx, ty = cx, y2 + 0.35
+                        if not is_blocking_walkway(sx, sy) and not is_blocking_walkway(tx, ty):
+                            build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (sx, sy, z_offset), (sofa_w, sofa_d, 0.7), 0.0, materials, floor_parent)
+                            build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (tx, ty, z_offset), (sofa_w * 0.9, 0.45, 0.5), math.pi, materials, floor_parent)
+                            if room_l >= 3.0:
+                                build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (cx, sy - 0.9, z_offset), (0.9, 0.55, 0.42), 0.0, materials, floor_parent)
+                            sofa_placed = True
+                            break
+                    elif wall == "S":
+                        sx, sy = cx, y2 + sofa_d/2
+                        tx, ty = cx, y1 - 0.35
+                        if not is_blocking_walkway(sx, sy) and not is_blocking_walkway(tx, ty):
+                            build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (sx, sy, z_offset), (sofa_w, sofa_d, 0.7), math.pi, materials, floor_parent)
+                            build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (tx, ty, z_offset), (sofa_w * 0.9, 0.45, 0.5), 0.0, materials, floor_parent)
+                            if room_l >= 3.0:
+                                build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (cx, sy + 0.9, z_offset), (0.9, 0.55, 0.42), math.pi, materials, floor_parent)
+                            sofa_placed = True
+                            break
+                    elif wall == "W":
+                        sx, sy = x1 + sofa_d/2, cy
+                        tx, ty = x2 - 0.35, cy
+                        if not is_blocking_walkway(sx, sy) and not is_blocking_walkway(tx, ty):
+                            build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (sx, sy, z_offset), (sofa_w, sofa_d, 0.7), math.pi/2, materials, floor_parent)
+                            build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (tx, ty, z_offset), (sofa_w * 0.9, 0.45, 0.5), -math.pi/2, materials, floor_parent)
+                            if room_w >= 3.0:
+                                build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (sx + 0.9, cy, z_offset), (0.9, 0.55, 0.42), math.pi/2, materials, floor_parent)
+                            sofa_placed = True
+                            break
+                    elif wall == "E":
+                        sx, sy = x2 - sofa_d/2, cy
+                        tx, ty = x1 + 0.35, cy
+                        if not is_blocking_walkway(sx, sy) and not is_blocking_walkway(tx, ty):
+                            build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (sx, sy, z_offset), (sofa_w, sofa_d, 0.7), -math.pi/2, materials, floor_parent)
+                            build_tv_unit(f"TVUnit_F{floor_idx}_{room['id']}", (tx, ty, z_offset), (sofa_w * 0.9, 0.45, 0.5), math.pi/2, materials, floor_parent)
+                            if room_w >= 3.0:
+                                build_coffee_table(f"CoffeeTable_F{floor_idx}_{room['id']}", (sx - 0.9, cy, z_offset), (0.9, 0.55, 0.42), -math.pi/2, materials, floor_parent)
+                            sofa_placed = True
+                            break
+                if not sofa_placed:
+                    build_sofa(f"Sofa_F{floor_idx}_{room['id']}", (cx, cy + 0.5, z_offset), (2.0, 0.85, 0.7), 0.0, materials, floor_parent)
+
             elif canonical == "dining_room":
-                build_dining_table(f"Dining_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.4, 0.9, 0.75), 0.0, materials, floor_parent)
+                dtx, dty = cx, cy
+                # If central placement blocks doors, shift to safest quadrant
+                if is_blocking_walkway(dtx, dty):
+                    safest_x, safest_y = cx, cy
+                    min_block_dist = 0.0
+                    for dx_offset in [-0.5, 0.5]:
+                        for dy_offset in [-0.5, 0.5]:
+                            test_x = cx + dx_offset
+                            test_y = cy + dy_offset
+                            dists = [math.sqrt((test_x - d["loc"][0])**2 + (test_y - d["loc"][1])**2) for d in room_doors]
+                            if dists and min(dists) > min_block_dist:
+                                min_block_dist = min(dists)
+                                safest_x, safest_y = test_x, test_y
+                    dtx, dty = safest_x, safest_y
+                
+                table_w, table_d = 1.4, 0.9
+                if room_w < 2.6 or room_l < 2.6:
+                    table_w, table_d = 1.0, 0.8  # Scale dining table down
+                build_dining_table(f"Dining_F{floor_idx}_{room['id']}", (dtx, dty, z_offset), (table_w, table_d, 0.75), 0.0, materials, floor_parent)
+
             elif canonical in ("bathroom", "toilet", "powder_room"):
-                build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (x1 + 0.4, y1 - 0.4, z_offset), math.pi, materials, floor_parent)
-                build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (x2 - 0.5, cy, z_offset), (0.8, 0.5, 0.85), -math.pi/2, materials, floor_parent)
-                build_shower(f"Shower_F{floor_idx}_{room['id']}", (x1 + 0.5, y2 + 0.5, z_offset), (0.9, 0.9, 2.0), 0.0, materials, floor_parent)
+                # Shower goes to corner furthest from doors
+                corners = [
+                    (x1 + 0.55, y1 - 0.55), # NW
+                    (x2 - 0.55, y1 - 0.55), # NE
+                    (x1 + 0.55, y2 + 0.55), # SW
+                    (x2 - 0.55, y2 + 0.55)  # SE
+                ]
+                corners_scored = []
+                for cx_val, cy_val in corners:
+                    dists = [math.sqrt((cx_val - d["loc"][0])**2 + (cy_val - d["loc"][1])**2) for d in room_doors]
+                    min_dist_val = min(dists) if dists else 9999.0
+                    corners_scored.append((min_dist_val, cx_val, cy_val))
+                
+                _, sh_x, sh_y = max(corners_scored)
+                build_shower(f"Shower_F{floor_idx}_{room['id']}", (sh_x, sh_y, z_offset), (0.9, 0.9, 2.0), 0.0, materials, floor_parent)
+
+                # Toilet against wall opposite to vanity or away from doors
+                toilet_placed = False
+                vanity_placed = False
+                for wall in ["N", "S", "W", "E"]:
+                    if wall == "N":
+                        tx_loc, ty_loc = cx, y1 - 0.25
+                        vx_loc, vy_loc = cx, y2 + 0.3
+                        if not is_blocking_walkway(tx_loc, ty_loc) and not toilet_placed:
+                            build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (tx_loc, ty_loc, z_offset), 0.0, materials, floor_parent)
+                            toilet_placed = True
+                        elif not is_blocking_walkway(vx_loc, vy_loc) and not vanity_placed:
+                            build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (vx_loc, vy_loc, z_offset), (0.7, 0.45, 0.85), math.pi, materials, floor_parent)
+                            vanity_placed = True
+                    elif wall == "S":
+                        tx_loc, ty_loc = cx, y2 + 0.25
+                        vx_loc, vy_loc = cx, y1 - 0.3
+                        if not is_blocking_walkway(tx_loc, ty_loc) and not toilet_placed:
+                            build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (tx_loc, ty_loc, z_offset), math.pi, materials, floor_parent)
+                            toilet_placed = True
+                        elif not is_blocking_walkway(vx_loc, vy_loc) and not vanity_placed:
+                            build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (vx_loc, vy_loc, z_offset), (0.7, 0.45, 0.85), 0.0, materials, floor_parent)
+                            vanity_placed = True
+                    elif wall == "W":
+                        tx_loc, ty_loc = x1 + 0.25, cy
+                        vx_loc, vy_loc = x2 - 0.3, cy
+                        if not is_blocking_walkway(tx_loc, ty_loc) and not toilet_placed:
+                            build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (tx_loc, ty_loc, z_offset), math.pi/2, materials, floor_parent)
+                            toilet_placed = True
+                        elif not is_blocking_walkway(vx_loc, vy_loc) and not vanity_placed:
+                            build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (vx_loc, vy_loc, z_offset), (0.7, 0.45, 0.85), -math.pi/2, materials, floor_parent)
+                            vanity_placed = True
+                    elif wall == "E":
+                        tx_loc, ty_loc = x2 - 0.25, cy
+                        vx_loc, vy_loc = x1 + 0.3, cy
+                        if not is_blocking_walkway(tx_loc, ty_loc) and not toilet_placed:
+                            build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (tx_loc, ty_loc, z_offset), -math.pi/2, materials, floor_parent)
+                            toilet_placed = True
+                        elif not is_blocking_walkway(vx_loc, vy_loc) and not vanity_placed:
+                            build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (vx_loc, vy_loc, z_offset), (0.7, 0.45, 0.85), math.pi/2, materials, floor_parent)
+                            vanity_placed = True
+                            
+                # Fallbacks in case one wasn't placed
+                if not toilet_placed:
+                    build_toilet(f"Toilet_F{floor_idx}_{room['id']}", (x1 + 0.4, y1 - 0.4, z_offset), math.pi, materials, floor_parent)
+                if not vanity_placed:
+                    build_vanity(f"Vanity_F{floor_idx}_{room['id']}", (x2 - 0.5, cy, z_offset), (0.8, 0.5, 0.85), -math.pi/2, materials, floor_parent)
+
             elif canonical == "kitchen":
-                build_kitchen_cabinet(f"Kitchen_F{floor_idx}_{room['id']}", (x1 + 0.7, cy, z_offset), (0.65, room_l - 0.8, 0.92), math.pi/2, materials, floor_parent)
-                build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (x2 - 0.45, y1 - 0.45, z_offset), (0.8, 0.75, 1.8), -math.pi/2, materials, floor_parent)
-                build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (cx, y1 - 0.4, z_offset), (0.75, 0.65, 0.92), 0.0, materials, floor_parent)
+                kitchen_placed = False
+                for wall in sorted(["W", "E", "N", "S"], key=score_wall, reverse=True):
+                    if wall == "W":
+                        kx, ky = x1 + 0.35, cy
+                        frx, fry = x1 + 0.45, y1 - 0.45
+                        ovx, ovy = x1 + 0.45, y2 + 0.45
+                        if not is_blocking_walkway(kx, ky) and not is_blocking_walkway(frx, fry) and not is_blocking_walkway(ovx, ovy):
+                            build_kitchen_cabinet(f"Kitchen_F{floor_idx}_{room['id']}", (kx, ky, z_offset), (0.65, room_l - 1.2, 0.92), math.pi/2, materials, floor_parent)
+                            build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (frx, fry, z_offset), (0.8, 0.75, 1.8), math.pi/2, materials, floor_parent)
+                            build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (ovx, ovy, z_offset), (0.75, 0.65, 0.92), math.pi/2, materials, floor_parent)
+                            kitchen_placed = True
+                            break
+                    elif wall == "E":
+                        kx, ky = x2 - 0.35, cy
+                        frx, fry = x2 - 0.45, y1 - 0.45
+                        ovx, ovy = x2 - 0.45, y2 + 0.45
+                        if not is_blocking_walkway(kx, ky) and not is_blocking_walkway(frx, fry) and not is_blocking_walkway(ovx, ovy):
+                            build_kitchen_cabinet(f"Kitchen_F{floor_idx}_{room['id']}", (kx, ky, z_offset), (0.65, room_l - 1.2, 0.92), -math.pi/2, materials, floor_parent)
+                            build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (frx, fry, z_offset), (0.8, 0.75, 1.8), -math.pi/2, materials, floor_parent)
+                            build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (ovx, ovy, z_offset), (0.75, 0.65, 0.92), -math.pi/2, materials, floor_parent)
+                            kitchen_placed = True
+                            break
+                if not kitchen_placed:
+                    build_kitchen_cabinet(f"Kitchen_F{floor_idx}_{room['id']}", (x1 + 0.7, cy, z_offset), (0.65, room_l - 0.8, 0.92), math.pi/2, materials, floor_parent)
+                    build_refrigerator(f"Fridge_F{floor_idx}_{room['id']}", (x2 - 0.45, y1 - 0.45, z_offset), (0.8, 0.75, 1.8), -math.pi/2, materials, floor_parent)
+                    build_oven(f"OvenRange_F{floor_idx}_{room['id']}", (cx, y1 - 0.4, z_offset), (0.75, 0.65, 0.92), 0.0, materials, floor_parent)
+
             elif canonical == "office":
-                build_office_desk(f"Desk_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.4, 0.7, 0.75), 0.0, materials, floor_parent)
+                desk_placed = False
+                for wall in sorted(["N", "S", "W", "E"], key=score_wall, reverse=True):
+                    if wall == "N":
+                        dx, dy = cx, y1 - 0.6
+                        if not is_blocking_walkway(dx, dy):
+                            build_office_desk(f"Desk_F{floor_idx}_{room['id']}", (dx, dy, z_offset), (1.4, 0.7, 0.75), 0.0, materials, floor_parent)
+                            desk_placed = True
+                            break
+                    elif wall == "S":
+                        dx, dy = cx, y2 + 0.6
+                        if not is_blocking_walkway(dx, dy):
+                            build_office_desk(f"Desk_F{floor_idx}_{room['id']}", (dx, dy, z_offset), (1.4, 0.7, 0.75), math.pi, materials, floor_parent)
+                            desk_placed = True
+                            break
+                if not desk_placed:
+                    build_office_desk(f"Desk_F{floor_idx}_{room['id']}", (cx, cy, z_offset), (1.4, 0.7, 0.75), 0.0, materials, floor_parent)
                 
         # 6. Multi-floor staircase transitions (stepped boxes)
         if num_floors > 1 and floor_idx == 0:
@@ -1358,10 +1913,10 @@ def build_floorplan_3d(layout_data: dict, output_dir: str, render_mode: str = "h
     size_house_x = abs(max_house_x - min_house_x)
     size_house_y = abs(max_house_y - min_house_y)
     max_dim = max(size_house_x, size_house_y, 4.0)
-    ortho_scale = max_dim * 1.35  # Increased to prevent cropping
+    ortho_scale = max_dim * 1.15  # Tighter framing to occupy most of the viewport
     
-    scene.render.resolution_x = 640
-    scene.render.resolution_y = 360
+    scene.render.resolution_x = 1280
+    scene.render.resolution_y = 720
     scene.render.image_settings.file_format = 'PNG'
     
     # 1. Top View Camera
