@@ -25,5 +25,5 @@ echo   - Local Swagger Documentation: http://127.0.0.1:8000/docs
 echo   - Local Health Check Status  : http://127.0.0.1:8000/health
 echo ==================================================================
 echo [*] Running server. Press Ctrl+C to terminate.
-python -m uvicorn services.api_gateway.main:app --host 127.0.0.1 --port 8000 --reload
+python -m uvicorn services.api_gateway.main:app --host 0.0.0.0 --port 8000 --reload
 pause

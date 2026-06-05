@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,7 +8,9 @@
     <!-- Google Fonts: Outfit (headings) and Inter (body) -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap"
+        rel="stylesheet">
     <style>
         :root {
             --bg-base: #090d16;
@@ -111,9 +114,21 @@
         }
 
         @keyframes pulse {
-            0% { transform: scale(0.9); opacity: 0.6; }
-            50% { transform: scale(1.2); opacity: 1; box-shadow: 0 0 12px var(--accent-emerald); }
-            100% { transform: scale(0.9); opacity: 0.6; }
+            0% {
+                transform: scale(0.9);
+                opacity: 0.6;
+            }
+
+            50% {
+                transform: scale(1.2);
+                opacity: 1;
+                box-shadow: 0 0 12px var(--accent-emerald);
+            }
+
+            100% {
+                transform: scale(0.9);
+                opacity: 0.6;
+            }
         }
 
         /* Dashboard Container Layout */
@@ -459,9 +474,17 @@
         }
 
         @keyframes float {
-            0% { transform: translateY(0px) rotate(0deg); }
-            50% { transform: translateY(-8px) rotate(1deg); }
-            100% { transform: translateY(0px) rotate(0deg); }
+            0% {
+                transform: translateY(0px) rotate(0deg);
+            }
+
+            50% {
+                transform: translateY(-8px) rotate(1deg);
+            }
+
+            100% {
+                transform: translateY(0px) rotate(0deg);
+            }
         }
 
         .placeholder-text {
@@ -485,7 +508,8 @@
             padding: 24px;
             backdrop-filter: blur(20px);
             box-shadow: var(--shadow-glow);
-            display: none; /* Shown only after completion */
+            display: none;
+            /* Shown only after completion */
         }
 
         .deliverables-panel.active {
@@ -494,8 +518,15 @@
         }
 
         @keyframes fadeInUp {
-            from { transform: translateY(12px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
+            from {
+                transform: translateY(12px);
+                opacity: 0;
+            }
+
+            to {
+                transform: translateY(0);
+                opacity: 1;
+            }
         }
 
         .deliverables-title {
@@ -611,6 +642,7 @@
     <!-- Import Google model-viewer Web Component for interactive premium 3D mesh navigation -->
     <script type="module" src="https://ajax.googleapis.com/ajax/libs/model-viewer/3.4.0/model-viewer.min.js"></script>
 </head>
+
 <body>
 
     <!-- Header Panel -->
@@ -627,12 +659,15 @@
 
     <!-- Main Workspace Grid -->
     <main class="dashboard-container">
-        
+
         <!-- Left Panel: Form Input & Pipeline Details -->
         <section class="workspace-panel">
             <div class="panel-heading">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color: var(--accent-blue);">
-                    <path d="M12 20h9M3 20v-8c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v8M13 20v-4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v8" stroke-linecap="round" stroke-linejoin="round"/>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                    style="color: var(--accent-blue);">
+                    <path
+                        d="M12 20h9M3 20v-8c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v8M13 20v-4c0-1.1.9-2 2-2h4c1.1 0 2 .9 2 2v8"
+                        stroke-linecap="round" stroke-linejoin="round" />
                 </svg>
                 <span>Architectural Space</span>
             </div>
@@ -640,7 +675,8 @@
             <!-- Text Prompt Input -->
             <div class="form-group">
                 <label for="prompt">Design Guidelines</label>
-                <textarea id="prompt" placeholder="Describe your target architectural layout...&#10;e.g. Design a sleek modernist 3-bedroom villa with parking garage, open kitchen, living room, and a classic front balcony."></textarea>
+                <textarea id="prompt"
+                    placeholder="Describe your target architectural layout...&#10;e.g. Design a sleek modernist 3-bedroom villa with parking garage, open kitchen, living room, and a classic front balcony."></textarea>
             </div>
 
             <!-- Architectural Style Selection -->
@@ -657,7 +693,8 @@
             <!-- Glowing Action Button -->
             <button id="generate-btn" class="generate-btn">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="margin-right: 4px;">
-                    <path d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-2.3l-.85-.6C8.83 12.18 8 10.66 8 9c0-2.21 1.79-4 4-4s4 1.79 4 4c0 1.66-.83 3.18-2.15 4.1z"/>
+                    <path
+                        d="M9 21c0 .55.45 1 1 1h4c.55 0 1-.45 1-1v-1H9v1zm3-19C8.14 2 5 5.14 5 9c0 2.38 1.19 4.47 3 5.74V17c0 .55.45 1 1 1h6c.55 0 1-.45 1-1v-2.26c1.81-1.27 3-3.36 3-5.74 0-3.86-3.14-7-7-7zm2.85 11.1l-.85.6V16h-4v-2.3l-.85-.6C8.83 12.18 8 10.66 8 9c0-2.21 1.79-4 4-4s4 1.79 4 4c0 1.66-.83 3.18-2.15 4.1z" />
                 </svg>
                 <span>Generate Blueprint</span>
             </button>
@@ -700,21 +737,26 @@
 
         <!-- Right Panel: Visualizer Viewport & Downloads -->
         <section class="display-panel">
-            
+
             <!-- Viewport Visualizer -->
             <div class="visualizer-container">
                 <div class="visualizer-header">
                     <div class="visualizer-title" style="display: flex; align-items: center; gap: 8px;">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-blue)" stroke-width="2">
-                            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke-linecap="round" stroke-linejoin="round"/>
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-blue)"
+                            stroke-width="2">
+                            <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" stroke-linecap="round"
+                                stroke-linejoin="round" />
                         </svg>
                         <span>GENERATED 2D FLOOR PLAN</span>
                     </div>
                     <div style="display: flex; align-items: center; gap: 12px;">
-                        <span id="dimension-tag" style="font-size: 11px; font-weight: 700; color: var(--accent-emerald); letter-spacing: 0.5px; text-transform: uppercase;"></span>
+                        <span id="dimension-tag"
+                            style="font-size: 11px; font-weight: 700; color: var(--accent-emerald); letter-spacing: 0.5px; text-transform: uppercase;"></span>
                         <button id="toggle-3d-btn" class="toggle-3d-btn" style="display: none;">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l-7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path
+                                    d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l-7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z" />
                                 <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
                                 <line x1="12" y1="22.08" x2="12" y2="12" />
                             </svg>
@@ -728,53 +770,65 @@
                     <div id="placeholder" class="wireframe-placeholder">
                         <div class="wireframe-grid"></div>
                         <div class="placeholder-text">Viewport Canvas Idle</div>
-                        <div class="placeholder-subtext">Input your layout preferences, select an architectural style, and click 'Generate Blueprint' to render vector schemas in real-time.</div>
+                        <div class="placeholder-subtext">Input your layout preferences, select an architectural style,
+                            and click 'Generate Blueprint' to render vector schemas in real-time.</div>
                     </div>
 
                     <!-- SVG Visualizer -->
                     <div id="svg-container" class="cad-svg-container"></div>
 
                     <!-- 3D Interactive Model Viewer -->
-                    <model-viewer id="model-3d-viewer"
-                        alt="Interactive 3D Architectural Floor Plan Model"
-                        camera-controls
-                        auto-rotate
-                        auto-rotate-delay="500"
-                        rotation-per-second="15deg"
-                        shadow-intensity="1"
-                        shadow-softness="0.8"
-                        environment-image="neutral"
-                        exposure="1.1"
-                        camera-orbit="45deg 60deg auto"
-                        min-camera-orbit="auto auto 1m"
+                    <model-viewer id="model-3d-viewer" alt="Interactive 3D Architectural Floor Plan Model"
+                        camera-controls auto-rotate auto-rotate-delay="500" rotation-per-second="15deg"
+                        shadow-intensity="1" shadow-softness="0.8" environment-image="neutral" exposure="1.1"
+                        camera-orbit="45deg 60deg auto" min-camera-orbit="auto auto 1m"
                         style="width:100%; height:100%; min-height:420px; display:none; background:#0c1220; border-radius:8px;">
                     </model-viewer>
                 </div>
             </div>
 
             <!-- Architectural Analysis Panel -->
-            <div id="analysis-panel" class="deliverables-panel" style="display: none; margin-bottom: 24px; padding: 20px;">
+            <div id="analysis-panel" class="deliverables-panel"
+                style="display: none; margin-bottom: 24px; padding: 20px;">
                 <div class="deliverables-title" style="margin-bottom: 12px;">Architectural Analysis</div>
-                <div class="analysis-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;">
-                    <div class="analysis-card" style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total Area</span>
-                        <span id="analysis-area" style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
+                <div class="analysis-grid"
+                    style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px;">
+                    <div class="analysis-card"
+                        style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <span
+                            style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Total
+                            Area</span>
+                        <span id="analysis-area"
+                            style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
                     </div>
-                    <div class="analysis-card" style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Rooms</span>
-                        <span id="analysis-rooms" style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
+                    <div class="analysis-card"
+                        style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <span
+                            style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Rooms</span>
+                        <span id="analysis-rooms"
+                            style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
                     </div>
-                    <div class="analysis-card" style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Wall Area</span>
-                        <span id="analysis-walls" style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
+                    <div class="analysis-card"
+                        style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <span
+                            style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Wall
+                            Area</span>
+                        <span id="analysis-walls"
+                            style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
                     </div>
-                    <div class="analysis-card" style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Efficiency</span>
-                        <span id="analysis-efficiency" style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--accent-emerald);">--</span>
+                    <div class="analysis-card"
+                        style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <span
+                            style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Efficiency</span>
+                        <span id="analysis-efficiency"
+                            style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--accent-emerald);">--</span>
                     </div>
-                    <div class="analysis-card" style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
-                        <span style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Style</span>
-                        <span id="analysis-style" style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
+                    <div class="analysis-card"
+                        style="background: rgba(30, 41, 59, 0.3); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 4px;">
+                        <span
+                            style="font-size: 9px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px;">Style</span>
+                        <span id="analysis-style"
+                            style="font-family: 'Outfit', sans-serif; font-size: 16px; font-weight: 700; color: var(--text-primary);">--</span>
                     </div>
                 </div>
             </div>
@@ -783,7 +837,7 @@
             <div id="deliverables-panel" class="deliverables-panel">
                 <div class="deliverables-title">Download Architectural Deliverables</div>
                 <div class="deliverables-grid">
-                    
+
                     <!-- SVG Vector Blueprint -->
                     <a id="dl-svg" href="#" target="_blank" class="deliverable-card">
                         <div class="deliverable-info">
@@ -791,7 +845,9 @@
                             <span class="deliverable-meta">Scalable Line Drawing (SVG)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -802,7 +858,9 @@
                             <span class="deliverable-meta">High-Res Render (PNG)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -813,7 +871,9 @@
                             <span class="deliverable-meta">CAD drawing archive (DXF)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -824,7 +884,9 @@
                             <span class="deliverable-meta">SaaS Industry-Standard 3D Model (GLB)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -835,7 +897,9 @@
                             <span class="deliverable-meta">AutoCAD 3D asset (OBJ)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -846,7 +910,9 @@
                             <span class="deliverable-meta">Exterior render visual (PNG)</span>
                         </div>
                         <div class="download-icon">
-                            <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+                            <svg viewBox="0 0 24 24">
+                                <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" />
+                            </svg>
                         </div>
                     </a>
 
@@ -857,7 +923,17 @@
     </main>
 
     <script>
-        const API_URL = "http://127.0.0.1:8000";
+        const API_URL = window.location.origin;
+
+        // Helper to resolve URLs (both local relative paths and absolute cloud storage URLs)
+        function getFullUrl(url) {
+            if (!url) return "";
+            if (url.startsWith("http://") || url.startsWith("https://")) {
+                return url;
+            }
+            return `${API_URL}${url}`;
+        }
+
         let token = null;
         let currentGlbUrl = null;
         let is3DMode = false;
@@ -874,7 +950,7 @@
         const svgContainer = document.getElementById("svg-container");
         const deliverablesPanel = document.getElementById("deliverables-panel");
         const dimensionTag = document.getElementById("dimension-tag");
-        
+
         // 3D & Analysis UI Elements
         const toggleBtn = document.getElementById("toggle-3d-btn");
         const modelViewer = document.getElementById("model-3d-viewer");
@@ -896,12 +972,12 @@
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ email: "frontend_user@nex.ai", password: "securepassword123" })
                 });
-                
+
                 // Get token via OAuth2 login endpoint
                 const formData = new FormData();
                 formData.append("username", "frontend_user@nex.ai");
                 formData.append("password", "securepassword123");
-                
+
                 const loginRes = await fetch(`${API_URL}/auth/login`, {
                     method: "POST",
                     body: formData
@@ -926,7 +1002,7 @@
                 // Now reveal
                 svgContainer.style.display = "none";
                 modelViewer.style.display = "block";
-                
+
                 toggleBtn.classList.add("active-3d");
                 toggleBtn.querySelector("span").innerText = "View in 2D";
             } else {
@@ -1042,7 +1118,7 @@
 
                     const res = await fetch(`${API_URL}/generate/status/${jobId}`, { headers });
                     const statusData = await res.json();
-                    
+
                     const progress = statusData.progress_percent;
                     const stage = statusData.current_stage;
 
@@ -1079,7 +1155,7 @@
                         progressBar.style.width = "100%";
                         progressPercent.innerText = "100%";
                         progressStage.innerText = "Deliverables ready!";
-                        
+
                         // Load final project details and render blueprint SVG
                         loadDeliverables(projectId);
                     } else if (statusData.status === "FAILED") {
@@ -1110,17 +1186,17 @@
 
                 if (floorplan) {
                     // Fetch the SVG vector blueprint and render inside HTML
-                    const svgRes = await fetch(`${API_URL}${floorplan.vector_svg_url}`);
+                    const svgRes = await fetch(getFullUrl(floorplan.vector_svg_url));
                     const svgText = await svgRes.text();
-                    
+
                     placeholder.style.display = "none";
                     svgContainer.innerHTML = svgText;
                     svgContainer.style.display = "flex";
 
                     // Map download links
-                    document.getElementById("dl-svg").href = `${API_URL}${floorplan.vector_svg_url}`;
-                    document.getElementById("dl-png").href = `${API_URL}${floorplan.image_url}`;
-                    document.getElementById("dl-dxf").href = `${API_URL}${floorplan.vector_dxf_url}`;
+                    document.getElementById("dl-svg").href = getFullUrl(floorplan.vector_svg_url);
+                    document.getElementById("dl-png").href = getFullUrl(floorplan.image_url);
+                    document.getElementById("dl-dxf").href = getFullUrl(floorplan.vector_dxf_url);
 
                     // Update dynamic dimensions tag and architectural analysis
                     if (floorplan.room_layout_json) {
@@ -1134,7 +1210,7 @@
                         const roomCount = m.rooms ? m.rooms.filter(r => !r.id.includes("corridor")).length : 0;
                         const wallArea = (totalArea * 0.137).toFixed(1);
                         const efficiency = (82.4 + (roomCount % 5) * 1.1).toFixed(1);
-                        
+
                         // Capitalize style selected
                         const styleVal = styleSelect.value;
                         const formattedStyle = styleVal.charAt(0).toUpperCase() + styleVal.slice(1);
@@ -1147,20 +1223,68 @@
 
                         // Display analysis panel
                         analysisPanel.style.display = "block";
+
+                        // Compute camera target and orbit for model-viewer using house geometry only
+                        try {
+                            if (m.rooms && m.rooms.length > 0) {
+                                let minX = 9999, maxX = -9999, minY = 9999, maxY = -9999;
+                                m.rooms.forEach(room => {
+                                    if (room.box) {
+                                        const [rx1, ry1, rx2, ry2] = room.box;
+                                        const x1 = (rx1 - m.width_px / 2) / m.scale_px_to_meter;
+                                        const x2 = (rx2 - m.width_px / 2) / m.scale_px_to_meter;
+                                        const y1 = (m.height_px / 2 - ry1) / m.scale_px_to_meter;
+                                        const y2 = (m.height_px / 2 - ry2) / m.scale_px_to_meter;
+                                        minX = Math.min(minX, x1, x2);
+                                        maxX = Math.max(maxX, x1, x2);
+                                        minY = Math.min(minY, y1, y2);
+                                        maxY = Math.max(maxY, y1, y2);
+                                    }
+                                });
+
+                                const overhang = 0.3;
+                                const rx1 = minX - overhang;
+                                const rx2 = maxX + overhang;
+                                const ry1 = Math.min(minY, maxY) - overhang;
+                                const ry2 = Math.max(minY, maxY) + overhang;
+                                const rcx = (rx1 + rx2) / 2;
+                                const rcy = (ry1 + ry2) / 2;
+
+                                const cMinX = minX - rcx;
+                                const cMaxX = maxX - rcx;
+                                const cMinY = Math.min(minY, maxY) - rcy;
+                                const cMaxY = Math.max(minY, maxY) - rcy;
+
+                                const sizeX = cMaxX - cMinX;
+                                const sizeY = cMaxY - cMinY;
+
+                                const numFloors = m.rooms.some(r => r.id.includes("first_floor") || r.id.includes("floor_2")) ? 2 : 1;
+                                const topZ = numFloors * (3.0 + 0.3); // WALL_HEIGHT_M = 3.0, FLOOR_SLAB_THICKNESS_M = 0.3
+                                const centerZ = topZ / 2;
+
+                                modelViewer.setAttribute("camera-target", `0m ${centerZ.toFixed(2)}m 0m`);
+
+                                const diag = Math.sqrt(sizeX * sizeX + sizeY * sizeY + topZ * topZ);
+                                const radius = (diag / 2) / 0.38268 / 0.8;
+                                modelViewer.setAttribute("camera-orbit", `45deg 60deg ${radius.toFixed(2)}m`);
+                            }
+                        } catch (err) {
+                            console.error("Error setting custom model-viewer camera bounds: ", err);
+                        }
                     }
                 }
 
                 if (model) {
                     const gltfUrl = model.gltf_url || "";
                     const glbUrl = gltfUrl.replace(".gltf", ".glb");
-                    document.getElementById("dl-gltf").href = `${API_URL}${glbUrl}`;
-                    document.getElementById("dl-obj").href = `${API_URL}${model.obj_url}`;
+                    document.getElementById("dl-gltf").href = getFullUrl(glbUrl);
+                    document.getElementById("dl-obj").href = getFullUrl(model.obj_url);
                     if (model.renders && model.renders.length > 0) {
-                        document.getElementById("dl-render").href = `${API_URL}${model.renders[0].image_url}`;
+                        document.getElementById("dl-render").href = getFullUrl(model.renders[0].image_url);
                     }
 
                     // Save the active GLB URL and make toggle button visible
-                    currentGlbUrl = `${API_URL}${glbUrl}`;
+                    currentGlbUrl = getFullUrl(glbUrl);
                     toggleBtn.style.display = "inline-flex";
                 }
 
@@ -1175,4 +1299,5 @@
         }
     </script>
 </body>
+
 </html>

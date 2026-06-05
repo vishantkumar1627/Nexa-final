@@ -47,6 +47,7 @@ async def download_file(folder: str, filename: str):
         ".svg": "image/svg+xml",
         ".dxf": "application/dxf",
         ".gltf": "model/gltf+json",
+        ".glb": "model/gltf-binary",
         ".obj": "model/obj",
         ".blend": "application/x-blender"
     }

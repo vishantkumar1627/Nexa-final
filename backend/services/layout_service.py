@@ -415,6 +415,7 @@ class LayoutGenerationService:
         rooms_with_doors = set()
         
         # Connect corridor hallway cells to neighbors
+        DOOR_HALF_W = 18  # half of door width in px (~0.9 m at default scale)
         for seg in shared_segments:
             t1 = self._get_base_type(seg["r1"]["id"])
             t2 = self._get_base_type(seg["r2"]["id"])
@@ -424,10 +425,21 @@ class LayoutGenerationService:
                 if t2 in ["corridor", "hallway"] and t1 in ["corridor", "hallway", "balcony"]:
                     continue
                 mid = (seg["span"][0] + seg["span"][1]) // 2
+                # Room that the door "belongs to" (non-corridor side)
+                owner_r = seg["r1"] if t1 != "corridor" else seg["r2"]
+                other_r = seg["r2"] if t1 != "corridor" else seg["r1"]
+                # Hinge at the min-span edge (near the room corner)
+                hinge_side = "min"  # hinge at span[0] end
                 doors.append({
-                    "room_id": seg["r1"]["id"] if t1 != "corridor" else seg["r2"]["id"],
+                    "room_id": owner_r["id"],
                     "center": [mid, seg["coord"]] if seg["direction"] == "horizontal" else [seg["coord"], mid],
-                    "direction": seg["direction"]
+                    "direction": seg["direction"],
+                    "room_type": self._get_base_type(owner_r["id"]),
+                    "room_box": owner_r["box"],
+                    "adjacent_box": other_r["box"],
+                    "span": seg["span"],
+                    "hinge_side": hinge_side,
+                    "door_half_w": DOOR_HALF_W,
                 })
                 rooms_with_doors.add(seg["r1"]["id"])
                 rooms_with_doors.add(seg["r2"]["id"])
@@ -448,10 +460,18 @@ class LayoutGenerationService:
                         if r_type == "bathroom" and other_type == "kitchen":
                             continue
                         mid = (seg["span"][0] + seg["span"][1]) // 2
+                        # Bathroom: hinge at span-max edge so leaf swings outward
+                        hinge_side = "max" if r_type == "bathroom" else "min"
                         doors.append({
                             "room_id": r_id,
                             "center": [mid, seg["coord"]] if seg["direction"] == "horizontal" else [seg["coord"], mid],
-                            "direction": seg["direction"]
+                            "direction": seg["direction"],
+                            "room_type": r_type,
+                            "room_box": r["box"],
+                            "adjacent_box": other["box"],
+                            "span": seg["span"],
+                            "hinge_side": hinge_side,
+                            "door_half_w": DOOR_HALF_W,
                         })
                         rooms_with_doors.add(r_id)
                         rooms_with_doors.add(other["id"])
@@ -464,58 +484,49 @@ class LayoutGenerationService:
         public_rooms = [r for r in rooms_layout if self._get_base_type(r["id"]) in ["living_room", "entrance", "dining_room"]]
         if not public_rooms:
             public_rooms = rooms_layout
-            
+
+        def _make_entrance_door(room, wall_coord, direction, span_axis_min, span_axis_max):
+            """Build an entrance door dict with full hinge metadata."""
+            mid = (span_axis_min + span_axis_max) // 2
+            if direction == "horizontal":
+                center = [mid, wall_coord]
+            else:
+                center = [wall_coord, mid]
+            return {
+                "room_id": room["id"],
+                "center": center,
+                "direction": direction,
+                "is_entrance": True,
+                "room_type": self._get_base_type(room["id"]),
+                "room_box": room["box"],
+                "adjacent_box": None,  # exterior — no adjacent room
+                "span": [span_axis_min, span_axis_max],
+                "hinge_side": "min",  # exterior doors hinge at left/top edge of span
+                "door_half_w": DOOR_HALF_W,
+            }
+
         for pr in public_rooms:
             box = pr["box"]
             if abs(box[3] - by2) < 5:
-                mid = (box[0] + box[2]) // 2
-                doors.append({
-                    "room_id": pr["id"],
-                    "center": [mid, by2],
-                    "direction": "horizontal",
-                    "is_entrance": True
-                })
+                doors.append(_make_entrance_door(pr, by2, "horizontal", box[0], box[2]))
                 entrance_placed = True
                 break
             if abs(box[0] - bx1) < 5:
-                mid = (box[1] + box[3]) // 2
-                doors.append({
-                    "room_id": pr["id"],
-                    "center": [bx1, mid],
-                    "direction": "vertical",
-                    "is_entrance": True
-                })
+                doors.append(_make_entrance_door(pr, bx1, "vertical", box[1], box[3]))
                 entrance_placed = True
                 break
             if abs(box[2] - bx2) < 5:
-                mid = (box[1] + box[3]) // 2
-                doors.append({
-                    "room_id": pr["id"],
-                    "center": [bx2, mid],
-                    "direction": "vertical",
-                    "is_entrance": True
-                })
+                doors.append(_make_entrance_door(pr, bx2, "vertical", box[1], box[3]))
                 entrance_placed = True
                 break
             if abs(box[1] - by1) < 5:
-                mid = (box[0] + box[2]) // 2
-                doors.append({
-                    "room_id": pr["id"],
-                    "center": [mid, by1],
-                    "direction": "horizontal",
-                    "is_entrance": True
-                })
+                doors.append(_make_entrance_door(pr, by1, "horizontal", box[0], box[2]))
                 entrance_placed = True
                 break
-                
+
         if not entrance_placed:
             box = public_rooms[0]["box"]
-            doors.append({
-                "room_id": public_rooms[0]["id"],
-                "center": [(box[0] + box[2]) // 2, box[3]],
-                "direction": "horizontal",
-                "is_entrance": True
-            })
+            doors.append(_make_entrance_door(public_rooms[0], box[3], "horizontal", box[0], box[2]))
             
         # 7. Exterior Windows placement based on taxonomy, room function, and optimal solar orientations
         windows = []
@@ -683,19 +694,28 @@ class LayoutGenerationService:
             "scale": scale
         }
 
-    def _anneal_layout(self, nodes: List[Dict[str, Any]], relationships: List[Any], prompt_style: str, n_iter: int = 150, dimensions: Optional[dict] = None) -> Dict[str, Any]:
+    def _anneal_layout(self, nodes: List[Dict[str, Any]], relationships: List[Any], prompt_style: str, n_iter: int = 40, dimensions: Optional[dict] = None) -> Dict[str, Any]:
         """Simulated annealing optimizer over BSP tree. Explores seed and sibling-swap moves and returns best-scoring candidate."""
         import math as _math
         current = self._generate_candidate(nodes, relationships, prompt_style, 42, dimensions=dimensions)
         best = current
         temperature = 1.0
-        decay = 0.95
+        decay = 0.85  # Faster cooling: focus on exploitation sooner
+        _seen_seeds = {42}  # Deduplicate seeds
 
         for i in range(n_iter):
+            # Early exit: if we already have an excellent layout, stop wasting compute
+            if best["score"] >= 120:
+                print(f"[Annealing] Early exit at iteration {i}: score={best['score']:.1f}")
+                break
+
             move = random.choice(["reseed", "swap_siblings", "reseed"])
             try:
                 if move == "reseed":
                     new_seed = random.randint(1, 9999)
+                    while new_seed in _seen_seeds and len(_seen_seeds) < 9000:
+                        new_seed = random.randint(1, 9999)
+                    _seen_seeds.add(new_seed)
                     candidate = self._generate_candidate(nodes, relationships, prompt_style, new_seed, dimensions=dimensions)
                 else:
                     shuffled = list(nodes)
@@ -703,6 +723,7 @@ class LayoutGenerationService:
                         i1, i2 = random.sample(range(len(shuffled)), 2)
                         shuffled[i1], shuffled[i2] = shuffled[i2], shuffled[i1]
                     new_seed = random.randint(1, 9999)
+                    _seen_seeds.add(new_seed)
                     candidate = self._generate_candidate(shuffled, relationships, prompt_style, new_seed, dimensions=dimensions)
 
                 delta = candidate["score"] - current["score"]
@@ -716,6 +737,142 @@ class LayoutGenerationService:
 
         return best
 
+    def _populate_furniture_for_rooms(self, rooms: List[Dict[str, Any]], scale: float):
+        """Populates each room with a structured list of furniture matching 2D annotations."""
+        import math
+        for room in rooms:
+            room["furniture"] = []
+            x1, y1, x2, y2 = room["box"]
+            w = x2 - x1
+            h = y2 - y1
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+            room_id = room["id"]
+            canonical = resolve_room_type(room_id)
+            
+            # Select wall orientation based on room aspect ratio/index to make it look realistic
+            theta = 0.0
+            if canonical == "bedroom":
+                if w >= h:
+                    theta = 0.0
+                else:
+                    theta = -math.pi / 2
+            elif canonical == "living_room":
+                theta = 0.0
+            elif canonical == "kitchen":
+                theta = 0.0
+            elif canonical == "bathroom":
+                theta = 0.0
+            
+            def add_item(itype, imodel, lx, ly, iw, ih, lrot):
+                # Rotate local coordinates (lx, ly) around room center (cx, cy) by theta
+                dx = lx - cx
+                dy = ly - cy
+                rx = cx + dx * math.cos(theta) - dy * math.sin(theta)
+                ry = cy + dx * math.sin(theta) + dy * math.cos(theta)
+                
+                # Final rotation
+                rot = lrot + theta
+                rot = (rot + math.pi) % (2 * math.pi) - math.pi
+                
+                room["furniture"].append({
+                    "type": itype,
+                    "model": imodel,
+                    "x": rx,
+                    "y": ry,
+                    "w": iw,
+                    "h": ih,
+                    "rot_z": rot
+                })
+
+            if canonical == "bedroom":
+                bed_w = w * 0.55
+                bed_h = h * 0.65
+                bx = cx
+                by = y1 + 12 + bed_h / 2
+                add_item("bed", "Bed_King", bx, by, bed_w, bed_h, 0.0)
+                
+                table_size = min(w * 0.12, 20)
+                tx1 = bx - bed_w / 2 - table_size / 2 - 4
+                tx2 = bx + bed_w / 2 + table_size / 2 + 4
+                ty = y1 + 12 + table_size / 2
+                add_item("side_table", "SideTable", tx1, ty, table_size, table_size, 0.0)
+                add_item("side_table", "SideTable", tx2, ty, table_size, table_size, 0.0)
+                
+                ward_w = w * 0.65
+                ward_h = min(h * 0.14, 22)
+                wx = cx
+                wy = y2 - 6 - ward_h / 2
+                add_item("wardrobe", "Bookshelf", wx, wy, ward_w, ward_h, 0.0)
+                
+            elif canonical in ("living_room", "lounge"):
+                sofa_w = w * 0.70
+                sofa_h = min(h * 0.18, 30)
+                sy1 = y1 + 10 + sofa_h / 2
+                add_item("sofa", "Couch", cx, sy1, sofa_w, sofa_h, 0.0)
+                
+                sy2 = y2 - 10 - sofa_h / 2
+                add_item("sofa", "Couch", cx, sy2, sofa_w, sofa_h, math.pi)
+                
+                table_w = sofa_w * 0.38
+                table_h = min(h * 0.14, 22)
+                add_item("coffee_table", "CoffeeTable", cx, cy, table_w, table_h, 0.0)
+                
+                tv_w = w * 0.40
+                tv_h = 8
+                add_item("tv_unit", "TV Unit", cx, y1 + 1 + tv_h / 2, tv_w, tv_h, 0.0)
+                
+            elif canonical == "dining_room":
+                table_w = w * 0.5
+                table_h = h * 0.5
+                add_item("dining_table", "DiningTable", cx, cy, table_w, table_h, 0.0)
+                
+            elif canonical == "kitchen":
+                cnt_d = min(w * 0.20, 24)
+                add_item("kitchen_cabinet", "KitchenCabinet", cx, y1 + 8 + cnt_d/2, w - 16, cnt_d, 0.0)
+                add_item("kitchen_cabinet", "KitchenCabinet", x1 + 8 + cnt_d/2, cy + 8, cnt_d, h - 16, math.pi/2)
+                
+                stove_w = 35
+                stove_h = 20
+                stx = x1 + cnt_d + 12 + stove_w / 2
+                sty = y1 + 10 + stove_h / 2
+                add_item("oven", "Oven", stx, sty, stove_w, stove_h, 0.0)
+                
+                sink_w = 28
+                sink_h = 16
+                six = x1 + 10 + sink_w / 2
+                siy = y1 + h/2
+                add_item("sink", "Sink", six, siy, sink_w, sink_h, 0.0)
+                
+                fridge_w = 24
+                fridge_h = 24
+                add_item("fridge", "Fridge", x2 - 8 - fridge_w/2, y1 + 8 + fridge_h/2, fridge_w, fridge_h, 0.0)
+                
+            elif canonical in ("bathroom", "toilet", "powder_room"):
+                show_w = min(w * 0.38, 40)
+                show_h = min(h * 0.38, 40)
+                add_item("shower", "Shower", x1 + 12 + show_w/2, y2 - 12 - show_h/2, show_w, show_h, 0.0)
+                
+                basin_w = min(w * 0.22, 22)
+                basin_h = min(h * 0.20, 18)
+                add_item("sink", "Vanity", x1 + 12 + basin_w/2, y1 + 12 + basin_h/2, basin_w, basin_h, 0.0)
+                
+                toilet_w = min(w * 0.20, 20)
+                toilet_h = min(h * 0.30, 28)
+                add_item("toilet", "Toilet", x2 - toilet_w - 12 + toilet_w/2, y1 + 12 + toilet_h/2, toilet_w, toilet_h, 0.0)
+                
+            elif canonical == "garage":
+                car_w = w * 0.45
+                car_h = h * 0.75
+                add_item("car", "Car", cx, cy, car_w, car_h, 0.0)
+                
+            elif canonical in ("office", "home_office", "study_room"):
+                desk_w = w * 0.6
+                desk_h = h * 0.25
+                add_item("desk", "Desk", x1 + 8 + desk_w/2, y1 + 8 + desk_h/2, desk_w, desk_h, 0.0)
+                add_item("chair", "Chair", x1 + 8 + w * 0.3, y1 + 8 + h * 0.38, 20, 20, 0.0)
+                add_item("monitor", "Monitor", x1 + 8 + w * 0.3, y1 + 5 + h * 0.06, w * 0.3, 4, 0.0)
+
     def generate_layout(self, graph_data: Dict[str, Any], prompt_style: str, dimensions: Optional[dict] = None) -> Dict[str, Any]:
         """Generates candidates, selects the best plan, renders blueprint image bytes. Canvas driven by NLP dimensions when provided."""
         nodes = graph_data.get("nodes", [])
@@ -723,7 +880,7 @@ class LayoutGenerationService:
 
         # 1. MULTI-LAYOUT GENERATION — simulated annealing with 3-seed fallback
         try:
-            best = self._anneal_layout(nodes, relationships, prompt_style, n_iter=150, dimensions=dimensions)
+            best = self._anneal_layout(nodes, relationships, prompt_style, n_iter=40, dimensions=dimensions)
             candidates = [best]
         except Exception as e:
             print(f"[Warning] Simulated annealing failed, falling back to 3-seed search: {e}")
@@ -744,6 +901,9 @@ class LayoutGenerationService:
         master_width = int(best.get("master_width", DEFAULT_CANVAS_W))
         master_height = int(best.get("master_height", DEFAULT_CANVAS_H))
         scale = max(1, int(round(best.get("scale", DEFAULT_SCALE_PX_PER_M))))
+
+        # Populate structured furniture list for rooms
+        self._populate_furniture_for_rooms(best["rooms"], scale)
         
         # Dynamic zoning colors from taxonomy metadata
         def _get_fill(room_id: str) -> tuple:

@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import math
 from typing import Dict, Any, List, Tuple
 
 from services.room_taxonomy import resolve_room_type, get_room_meta
@@ -37,8 +38,16 @@ class FloorplanVectorizationService:
         return lines
 
     # ── Room-type SVG furniture dispatcher ───────────────────────────────────
-    def _draw_furniture_svg(self, room_type: str, box: List[int]) -> List[str]:
+    def _draw_furniture_svg(self, room: Dict[str, Any]) -> List[str]:
         """Routes to a specific procedural renderer or the generic fallback based on taxonomy."""
+        if "furniture" in room and room["furniture"]:
+            lines = []
+            for item in room["furniture"]:
+                lines.extend(self._draw_item_svg(item))
+            return lines
+
+        room_type = room["id"]
+        box = room["box"]
         canonical = resolve_room_type(room_type)
         meta = get_room_meta(canonical)
         hex_color = meta.get("hex_color", "#e2e8f0")
@@ -51,6 +60,176 @@ class FloorplanVectorizationService:
 
         # Fallback: generic furniture icon grid
         return self._draw_generic_furniture(furniture_list, box, hex_color)
+
+    def _draw_item_svg(self, item: Dict[str, Any]) -> List[str]:
+        """Renders an individual furniture item based on its 2D coordinates and rotation."""
+        itype = item["type"]
+        cx, cy = item["x"], item["y"]
+        w, h = item["w"], item["h"]
+        rot = item.get("rot_z", 0.0)
+        
+        lines = []
+        deg = math.degrees(rot)
+        lines.append(f'  <g transform="rotate({deg:.1f}, {cx:.1f}, {cy:.1f})">')
+        
+        # Local bounding box coordinates centered at cx, cy
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        
+        furniture_color = "#4a5568"
+        furniture_fill = "#f7fafc"
+        wood_color = "#cbd5e0"
+        
+        if itype == "bed":
+            # Draw bed
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="2" />')
+            lines.append(f'    <rect x="{x1 + 3}" y="{y1 + 3}" width="{w - 6}" height="{h - 6}" rx="1" fill="none" stroke="{furniture_color}" stroke-width="0.75" />')
+            
+            # Pillows
+            pillow_w = w * 0.38
+            pillow_h = h * 0.18
+            px1 = x1 + w * 0.08
+            px2 = x1 + w * 0.54
+            py = y1 + h * 0.06
+            lines.append(f'    <rect x="{px1}" y="{py}" width="{pillow_w}" height="{pillow_h}" rx="2" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <rect x="{px2}" y="{py}" width="{pillow_w}" height="{pillow_h}" rx="2" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            
+            # Duvet fold
+            dy = y1 + h * 0.32
+            lines.append(f'    <line x1="{x1}" y1="{dy}" x2="{x1 + w}" y2="{dy}" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <path d="M {x1} {dy} L {x1 + 8} {dy - 4} L {x1 + w - 8} {dy - 4} L {x1 + w} {dy}" fill="none" stroke="{furniture_color}" stroke-width="1" />')
+            
+        elif itype == "side_table":
+            # Side table
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <circle cx="{cx}" cy="{cy}" r="{w * 0.3}" fill="#ffeb3b" fill-opacity="0.3" stroke="{furniture_color}" stroke-width="0.75" />')
+            
+        elif itype in ("wardrobe", "bookshelf"):
+            # Wardrobe/bookshelf
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            label = "WARDROBE" if itype == "wardrobe" else "BOOKSHELF"
+            font_sz = "7px" if w < 50 else "8px"
+            lines.append(f'    <text x="{cx}" y="{cy + 3}" font-family="Inter, sans-serif" font-weight="600" font-size="{font_sz}" fill="{furniture_color}" text-anchor="middle" letter-spacing="0.5">{label}</text>')
+            # Hanger lines inside
+            for hx in np.linspace(x1 + 6, x1 + w - 6, max(3, int(w/12))):
+                lines.append(f'    <line x1="{hx - 2}" y1="{y1 + 2}" x2="{hx + 2}" y2="{y1 + 2}" stroke="{wood_color}" stroke-width="0.75" />')
+                lines.append(f'    <line x1="{hx}" y1="{y1 + 2}" x2="{hx}" y2="{y2 - 2}" stroke="{wood_color}" stroke-width="0.75" />')
+                
+        elif itype == "sofa":
+            # Sofa
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="2" />')
+            # Armrests
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="6" height="{h}" rx="1" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <rect x="{x2 - 6}" y="{y1}" width="6" height="{h}" rx="1" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            # Cushions
+            n_cush = 3 if w > 60 else 2
+            c_w = (w - 12) / n_cush
+            for ci in range(n_cush):
+                cx1 = x1 + 6 + ci * c_w
+                lines.append(f'    <rect x="{cx1 + 1}" y="{y1 + 4}" width="{c_w - 2}" height="{h - 8}" rx="1" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+                
+        elif itype == "coffee_table":
+            # Coffee table
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" stroke-dasharray="2,2" />')
+            lines.append(f'    <line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{wood_color}" stroke-width="0.5" />')
+            lines.append(f'    <line x1="{x1}" y1="{y2}" x2="{x2}" y2="{y1}" stroke="{wood_color}" stroke-width="0.5" />')
+            
+        elif itype == "tv_unit":
+            # TV unit
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <text x="{cx}" y="{cy + 2.5}" font-family="Inter, sans-serif" font-weight="600" font-size="6px" fill="{furniture_color}" text-anchor="middle">T.V. UNIT</text>')
+            
+        elif itype == "dining_table":
+            # Dining table
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <rect x="{x1 + 4}" y="{y1 + 4}" width="{w - 8}" height="{h - 8}" rx="1" fill="none" stroke="{wood_color}" stroke-width="1" />')
+            # Chairs around table
+            chair_w = 12
+            for cx_c in [cx - w/4, cx + w/4]:
+                lines.append(f'    <rect x="{cx_c - chair_w/2}" y="{y1 - 4}" width="{chair_w}" height="4" rx="1" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+                lines.append(f'    <rect x="{cx_c - chair_w/2}" y="{y2}" width="{chair_w}" height="4" rx="1" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+                
+        elif itype == "kitchen_cabinet":
+            # Kitchen counter cabinet
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <line x1="{x1}" y1="{y1 + 4}" x2="{x2}" y2="{y1 + 4}" stroke="{wood_color}" stroke-width="0.5" />')
+            
+        elif itype == "fridge":
+            # Refrigerator
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <line x1="{cx}" y1="{y1}" x2="{cx}" y2="{y2}" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <rect x="{cx - 2}" y="{cy - 5}" width="1.5" height="10" fill="{furniture_color}" />')
+            lines.append(f'    <rect x="{cx + 0.5}" y="{cy - 5}" width="1.5" height="10" fill="{furniture_color}" />')
+            
+        elif itype == "oven":
+            # Stove / Oven
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="#ffffff" stroke="{furniture_color}" stroke-width="1.25" />')
+            for bx_offset in [-w/4, w/4]:
+                for by_offset in [-h/4, h/4]:
+                    lines.append(f'    <circle cx="{cx + bx_offset}" cy="{cy + by_offset}" r="3" fill="none" stroke="{furniture_color}" stroke-width="1" />')
+                    
+        elif itype == "sink":
+            # Sink
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="#ffffff" stroke="{furniture_color}" stroke-width="1.25" />')
+            lines.append(f'    <rect x="{x1 + 2}" y="{y1 + 2}" width="{w - 4}" height="{h - 4}" rx="1" fill="none" stroke="{furniture_color}" stroke-width="0.75" />')
+            lines.append(f'    <circle cx="{x2 - 3}" cy="{cy}" r="1" fill="{furniture_color}" />')
+            lines.append(f'    <line x1="{x2 - 3}" y1="{cy}" x2="{x2 - 8}" y2="{cy}" stroke="{furniture_color}" stroke-width="1" />')
+            
+        elif itype == "toilet":
+            # Toilet
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="6" rx="1" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <path d="M {x1 + 2} {y1 + 6} Q {cx} {y2}, {x2 - 2} {y1 + 6} Z" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <ellipse cx="{cx}" cy="{y1 + 14}" rx="{w/2 - 3}" ry="5" fill="#ffffff" stroke="{furniture_color}" stroke-width="0.75" />')
+            
+        elif itype == "shower":
+            # Shower
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" fill="none" stroke="{furniture_color}" stroke-width="1" stroke-dasharray="2,2" />')
+            lines.append(f'    <circle cx="{cx}" cy="{cy}" r="2" fill="none" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{furniture_color}" stroke-width="0.5" stroke-dasharray="2,2" />')
+            lines.append(f'    <line x1="{x2}" y1="{y1}" x2="{x1}" y2="{y2}" stroke="{furniture_color}" stroke-width="0.5" stroke-dasharray="2,2" />')
+            
+        elif itype == "car":
+            # Car
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="12" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="2" />')
+            lines.append(f'    <path d="M {x1 + 5} {y1 + h * 0.28} Q {cx} {y1 + h * 0.22}, {x2 - 5} {y1 + h * 0.28} L {x2 - 8} {y1 + h * 0.38} Q {cx} {y1 + h * 0.35}, {x1 + 8} {y1 + h * 0.38} Z" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <path d="M {x1 + 6} {y1 + h * 0.78} Q {cx} {y1 + h * 0.82}, {x2 - 6} {y1 + h * 0.78} L {x2 - 10} {y1 + h * 0.70} Q {cx} {y1 + h * 0.72}, {x1 + 10} {y1 + h * 0.70} Z" fill="#ffffff" stroke="{furniture_color}" stroke-width="1" />')
+            lines.append(f'    <circle cx="{x1 + 12}" cy="{y1 + h * 0.45}" r="4" fill="none" stroke="{furniture_color}" stroke-width="1.25" />')
+            
+        elif itype == "desk":
+            # Desk
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <text x="{cx}" y="{cy + 3}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">DESK</text>')
+            
+        elif itype == "chair":
+            # Chair
+            lines.append(f'    <circle cx="{cx}" cy="{cy}" r="{w/2}" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" />')
+            
+        elif itype == "monitor":
+            # Monitor
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="1" fill="#1a202c" stroke="{furniture_color}" stroke-width="1" />')
+            
+        elif itype == "treadmill":
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <text x="{cx}" y="{cy + 3}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">TREADMILL</text>')
+            
+        elif itype == "bench":
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <text x="{cx}" y="{cy + 3}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">BENCH</text>')
+            
+        elif itype == "weights":
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="3" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1.5" />')
+            lines.append(f'    <text x="{cx}" y="{cy + 3}" font-family="Inter" font-size="7px" fill="{furniture_color}" text-anchor="middle">WEIGHTS</text>')
+            
+        else:
+            # Fallback
+            lines.append(f'    <rect x="{x1}" y="{y1}" width="{w}" height="{h}" rx="2" fill="{furniture_fill}" stroke="{furniture_color}" stroke-width="1" opacity="0.8" />')
+            label = itype.replace("_", " ").upper()
+            lines.append(f'    <text x="{cx}" y="{cy + 2.5}" font-family="Inter,sans-serif" font-size="6px" fill="#4a5568" text-anchor="middle">{label}</text>')
+            
+        lines.append('  </g>')
+        return lines
 
     def _draw_specific_furniture(self, canonical: str, box: List[int]):
         """Returns SVG lines for known room types, or None to trigger the generic fallback."""
@@ -417,7 +596,7 @@ class FloorplanVectorizationService:
 
         # Draw Procedural Furniture vectors inside rooms
         for room in rooms:
-            svg_lines.extend(self._draw_furniture_svg(room["id"], room["box"]))
+            svg_lines.extend(self._draw_furniture_svg(room))
 
         # Draw Walls
         for wall in walls:
@@ -433,11 +612,105 @@ class FloorplanVectorizationService:
             wx2, wy2 = win["end"]
             svg_lines.append(f'  <line class="window" x1="{wx1}" y1="{wy1}" x2="{wx2}" y2="{wy2}" />')
 
-        # Draw Doors
+        # ── Door drawing: hinge-pivot with correct leaf geometry ────────────────
+        # Architectural convention:
+        #   • Hinge point is fixed at one end of the door opening on the wall.
+        #   • Door leaf (closed) is perpendicular to the wall, extending into the
+        #     owning room.  Leaf length == door_half_w * 2 (≈ 0.9 m default).
+        #   • Quarter-circle arc sweeps from leaf tip to the far end of the
+        #     opening, showing the 90° swing path.
+        #   • Exterior / bathroom doors: hinge placed so leaf swings outward.
+        #   • Interior doors: leaf swings into owning room (against nearest wall).
+        import math as _dmath
+        DOOR_WIDTH = 36  # px — full door leaf length (~0.9 m at default scale)
+
         for door in doors:
-            dcx, dcy = door["center"]
-            svg_lines.append(f'  <path class="door-swing" d="M {dcx} {dcy-12} A 12 12 0 0 1 {dcx+12} {dcy}" />')
-            svg_lines.append(f'  <line class="door-panel" x1="{dcx}" y1="{dcy}" x2="{dcx}" y2="{dcy-12}" />')
+            dcx, dcy   = door["center"]
+            direction  = door.get("direction", "horizontal")
+            is_entrance = door.get("is_entrance", False)
+            room_box   = door.get("room_box")       # owning room bounding box
+            adj_box    = door.get("adjacent_box")   # adjacent room (or None)
+            span       = door.get("span")           # [span_min, span_max] along wall
+            hinge_side = door.get("hinge_side", "min")   # which end of span = hinge
+            room_type  = door.get("room_type", "")
+
+            # ── Compute hinge position (on the wall line) ───────────────────
+            if span:
+                if hinge_side == "min":
+                    hinge_along = span[0]   # px coordinate along the wall
+                    tip_along   = span[0] + DOOR_WIDTH  # far end of opening
+                else:
+                    hinge_along = span[1]
+                    tip_along   = span[1] - DOOR_WIDTH
+            else:
+                # Legacy fallback: derive from centre ± half-width
+                hinge_along = dcx - DOOR_WIDTH // 2 if direction == "horizontal" else dcy - DOOR_WIDTH // 2
+                tip_along   = hinge_along + DOOR_WIDTH
+
+            # ── Determine which side of the wall is "into the room" ─────────
+            # For a horizontal wall (direction == "horizontal"):
+            #   wall is at y == dcy.  Room interior is either above (y < dcy) or below (y > dcy).
+            # For a vertical wall (direction == "vertical"):
+            #   wall is at x == dcx.  Room interior is either left (x < dcx) or right (x > dcx).
+            if direction == "horizontal":
+                wall_y = dcy
+                if room_box:
+                    # Room center Y relative to wall
+                    room_cy = (room_box[1] + room_box[3]) / 2
+                    swing_sign = -1 if room_cy < wall_y else 1  # -1 = upward (into room above wall)
+                else:
+                    # Fallback: interior wall swings north; exterior swings outward
+                    swing_sign = -1 if not is_entrance else 1
+
+                # Exterior (entrance) door swings outward (away from room)
+                if is_entrance or room_type == "bathroom":
+                    swing_sign = -swing_sign
+
+                # Hinge is on the wall; leaf goes perpendicularly into (or out of) room
+                hx, hy = hinge_along, wall_y           # hinge point
+                # Closed leaf tip: perpendicular from hinge, length = DOOR_WIDTH
+                lx, ly = hinge_along, wall_y + swing_sign * DOOR_WIDTH
+                # Open leaf tip: at the far-end of the opening on the wall
+                ax, ay = tip_along, wall_y
+
+                # SVG arc: from closed tip (lx, ly) to open tip (ax, ay)
+                # Radius = DOOR_WIDTH, sweep direction based on swing_sign
+                sweep = 1 if swing_sign > 0 else 0
+
+                svg_lines.append(
+                    f'  <line class="door-panel" x1="{hx:.1f}" y1="{hy:.1f}" '
+                    f'x2="{lx:.1f}" y2="{ly:.1f}" />'
+                )
+                svg_lines.append(
+                    f'  <path class="door-swing" d="M {lx:.1f} {ly:.1f} '
+                    f'A {DOOR_WIDTH} {DOOR_WIDTH} 0 0 {sweep} {ax:.1f} {ay:.1f}" />'
+                )
+
+            else:  # vertical wall
+                wall_x = dcx
+                if room_box:
+                    room_cx = (room_box[0] + room_box[2]) / 2
+                    swing_sign = -1 if room_cx < wall_x else 1  # -1 = leftward (into room left of wall)
+                else:
+                    swing_sign = -1 if not is_entrance else 1
+
+                if is_entrance or room_type == "bathroom":
+                    swing_sign = -swing_sign
+
+                hx, hy = wall_x, hinge_along           # hinge point
+                lx, ly = wall_x + swing_sign * DOOR_WIDTH, hinge_along  # closed leaf tip
+                ax, ay = wall_x, tip_along             # open leaf tip
+
+                sweep = 1 if swing_sign > 0 else 0
+
+                svg_lines.append(
+                    f'  <line class="door-panel" x1="{hx:.1f}" y1="{hy:.1f}" '
+                    f'x2="{lx:.1f}" y2="{ly:.1f}" />'
+                )
+                svg_lines.append(
+                    f'  <path class="door-swing" d="M {lx:.1f} {ly:.1f} '
+                    f'A {DOOR_WIDTH} {DOOR_WIDTH} 0 0 {sweep} {ax:.1f} {ay:.1f}" />'
+                )
 
         # Draw Room Annotation Text Labels
         for room in rooms:

@@ -58,6 +58,13 @@ mock_layout = {
       "zone": "service",
       "box": [250, 300, 450, 450],  # 4m x 3m
       "label": "KITCHEN"
+    },
+    {
+      "id": "garage_1",
+      "type": "garage",
+      "zone": "utility",
+      "box": [450, 300, 700, 500],  # 5m x 4m (in pixels: 250px x 200px)
+      "label": "GARAGE"
     }
   ],
   "walls": [
@@ -71,7 +78,12 @@ mock_layout = {
     # Interior partitions
     [300, 100, 300, 300, False],
     [100, 300, 300, 300, False],
-    [250, 300, 250, 450, False]
+    [250, 300, 250, 450, False],
+    # Garage walls
+    [450, 300, 700, 300, True],
+    [700, 300, 700, 500, True],
+    [700, 500, 450, 500, True],
+    [450, 500, 450, 300, False]
   ],
   "doors": [
     {
@@ -153,7 +165,8 @@ room_bounds = {
     "bedroom": {"min_x": -6.0, "max_x": -2.0, "min_y": 0.0, "max_y": 4.0},
     "living_room": {"min_x": -2.0, "max_x": 3.0, "min_y": 0.0, "max_y": 4.0},
     "bathroom": {"min_x": -6.0, "max_x": -3.0, "min_y": -3.0, "max_y": 0.0},
-    "kitchen": {"min_x": -3.0, "max_x": 1.0, "min_y": -3.0, "max_y": 0.0}
+    "kitchen": {"min_x": -3.0, "max_x": 1.0, "min_y": -3.0, "max_y": 0.0},
+    "garage": {"min_x": 1.0, "max_x": 6.0, "min_y": -4.0, "max_y": 0.0}
 }
 
 active_collection = bpy.context.view_layer.active_layer_collection.collection

@@ -58,6 +58,14 @@ app.include_router(projects.router)
 app.include_router(generate.router)
 app.include_router(files.router)
 
+class CustomStaticFiles(StaticFiles):
+    def get_mime_type(self, path: str) -> str:
+        if path.endswith(".glb"):
+            return "model/gltf-binary"
+        elif path.endswith(".gltf"):
+            return "model/gltf+json"
+        return super().get_mime_type(path)
+
 # Mount outputs static directory for local downloads
 try:
     os.makedirs(settings.STORAGE_DIR, exist_ok=True)
@@ -66,7 +74,7 @@ try:
     os.makedirs(os.path.join(settings.STORAGE_DIR, "models3d"), exist_ok=True)
     os.makedirs(os.path.join(settings.STORAGE_DIR, "renders"), exist_ok=True)
     
-    app.mount("/outputs", StaticFiles(directory=settings.STORAGE_DIR), name="outputs")
+    app.mount("/outputs", CustomStaticFiles(directory=settings.STORAGE_DIR), name="outputs")
     logger.info(f"Successfully mounted local static folder: {settings.STORAGE_DIR}")
 except Exception as e:
     logger.error(f"Failed to mount local static folder: {e}")
